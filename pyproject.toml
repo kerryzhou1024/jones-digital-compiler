@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jones-digital-compiler"
+version = "0.1.0"
+description = "Policy-driven AJL circuit compiler for Jones-polynomial research"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.2,<3",
+    "qiskit>=2.4,<3",
+]
+
+[project.optional-dependencies]
+notebook = [
+    "ipykernel>=6.29,<7",
+    "ipython>=8,<9",
+    "matplotlib>=3.10,<4",
+]
+dev = [
+    "nbclient>=0.10,<1",
+    "nbformat>=5.10,<6",
+    "pytest>=8,<10",
+    "ruff>=0.9,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["digital_compiler*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

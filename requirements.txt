@@ -1,0 +1,3 @@
+# Install the compiler without an editable .pth hook. macOS can mark .pth files
+# inside an iCloud-synchronized virtual environment as hidden, so Python skips them.
+.[notebook,dev]
