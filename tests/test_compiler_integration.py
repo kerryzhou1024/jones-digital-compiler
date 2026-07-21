@@ -16,7 +16,6 @@ from digital_compiler import (
     DenseAJLReference,
     Level3Policy,
     MultiplexedHeightSynthesis,
-    NoAncillaMCX,
     SwitchCaseHeightSynthesis,
     circuit_gate_count_depth,
     compilation_summary,
@@ -190,10 +189,9 @@ def test_policy_injection_changes_workspace_dispatch_and_metadata() -> None:
     assert metadata["compiler_config"]["workspace_qubits"] == 2
 
 
-def test_no_ancilla_policy_removes_physical_workspace_and_preserves_semantics() -> None:
+def test_default_policy_uses_no_workspace_and_preserves_semantics() -> None:
     model = AJLPathModel(2, 5)
-    config = CompilerConfig(level3=Level3Policy(mcx=NoAncillaMCX()))
-    compiler = AJLCompiler(model, config)
+    compiler = AJLCompiler(model)
     compilation = compiler.compile_hadamard_test("s1^2", "10")
 
     assert compiler.work_qubits == 0
@@ -231,12 +229,9 @@ def test_no_ancilla_policy_removes_physical_workspace_and_preserves_semantics() 
 
 
 @pytest.mark.parametrize("controlled", [False, True])
-def test_no_ancilla_level_3_braid_matches_dense_oracle(controlled: bool) -> None:
+def test_default_level_3_braid_matches_dense_oracle(controlled: bool) -> None:
     model = AJLPathModel(3, 5)
-    compiler = AJLCompiler(
-        model,
-        CompilerConfig(level3=Level3Policy(mcx=NoAncillaMCX())),
-    )
+    compiler = AJLCompiler(model)
     assert_braid_matches_dense(
         compiler,
         DenseAJLReference(model),
@@ -244,6 +239,38 @@ def test_no_ancilla_level_3_braid_matches_dense_oracle(controlled: bool) -> None
         level=3,
         controlled=controlled,
     )
+
+
+def test_clean_ancilla_policy_remains_available_as_an_opt_in() -> None:
+    config = CompilerConfig(level3=Level3Policy(mcx=CleanAncillaMCX()))
+    compiler = AJLCompiler(AJLPathModel(2, 5), config)
+    compilation = compiler.compile_hadamard_test("s1^2", "10")
+
+    assert compiler.work_qubits == 1
+    assert compiler.logical_qubits == 7
+    assert register_signature(compilation.level_1_varphi)[0][-1] == (
+        "adder_work",
+        1,
+    )
+    metadata = compilation.level_3_single_control.metadata
+    assert metadata["lowering_policies"]["mcx"] == "clean_ancilla_toffoli_ladder"
+    assert metadata["compiler_config"]["workspace_qubits"] == 1
+
+
+def test_default_no_ancilla_policy_reduces_t_count_for_k9() -> None:
+    model = AJLPathModel(2, 9)
+    default = AJLCompiler(model).compile_hadamard_test("s1", "10")
+    clean_config = CompilerConfig(level3=Level3Policy(mcx=CleanAncillaMCX()))
+    clean = AJLCompiler(model, clean_config).compile_hadamard_test("s1", "10")
+
+    default_counts = default.level_3_single_control.count_ops()
+    clean_counts = clean.level_3_single_control.count_ops()
+    default_t_count = default_counts.get("t", 0) + default_counts.get("tdg", 0)
+    clean_t_count = clean_counts.get("t", 0) + clean_counts.get("tdg", 0)
+
+    assert default_t_count == 14
+    assert clean_t_count == 56
+    assert default_t_count < clean_t_count
 
 
 def test_gate_count_depth_report_uses_exact_gate_names_and_parallel_depth() -> None:
@@ -268,8 +295,8 @@ def test_default_k5_resources_and_metadata_regression() -> None:
     compiler = AJLCompiler(AJLPathModel(2, 5))
     compilation = compiler.compile_hadamard_test("s1^2", "10")
     assert compiler.height_qubits == 3
-    assert compiler.work_qubits == 1
-    assert compiler.logical_qubits == 7
+    assert compiler.work_qubits == 0
+    assert compiler.logical_qubits == 6
     assert dict(compilation.level_2_multicontrolled.count_ops()) == {
         "cx": 40,
         "ry": 24,
@@ -297,11 +324,11 @@ def test_default_k5_resources_and_metadata_regression() -> None:
     )
     summary = compilation_summary(compilation)
     assert summary["level_3_lowering_policies"] == {
-        "mcx": "clean_ancilla_toffoli_ladder",
+        "mcx": "no_ancilla_recursive_phase",
         "multi_controlled_rotations": "gray_code_sparse_multiplexor",
         "multi_controlled_phase": "recursive_corrected_rz",
     }
-    assert summary["logical_qubits_each_level"] == 7
+    assert summary["logical_qubits_each_level"] == 6
     assert summary["level_1_gate_count_depth"]["total"]["count"] == 5
     assert summary["level_2_gate_count_depth"]["total"]["count"] == 95
     assert summary["level_3_gate_count_depth"]["total"]["count"] == 169

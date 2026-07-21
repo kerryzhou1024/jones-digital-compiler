@@ -304,7 +304,7 @@ class RecursiveMCPhase:
 
 @dataclass(frozen=True)
 class NoAncillaMCX:
-    """Exact ancilla-free MCX through a recursively lowered selected phase."""
+    """Exact ancilla-free MCX using recursive phase and Gray-code multiplexing."""
 
     name: str = "no_ancilla_recursive_phase"
 
@@ -342,7 +342,7 @@ class NoAncillaMCX:
 class Level3Policy:
     """Independent decomposition choices used by the Level-3 lowering pass."""
 
-    mcx: MCXDecomposer = field(default_factory=CleanAncillaMCX)
+    mcx: MCXDecomposer = field(default_factory=NoAncillaMCX)
     rotations: MCRDecomposer = field(default_factory=GrayCodeMCR)
     phases: MCPhaseDecomposer = field(default_factory=RecursiveMCPhase)
 

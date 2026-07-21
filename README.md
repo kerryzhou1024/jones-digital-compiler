@@ -34,4 +34,9 @@ compiler = AJLCompiler(model, CompilerConfig())
 result = compiler.compile_hadamard_test("s1^2", "10", part="real")
 ```
 
+The default Level 3 policy uses exact no-ancilla MCX lowering through recursive
+phase decomposition and Gray-code multiplexed rotations. Use
+`Level3Policy(mcx=CleanAncillaMCX())` to opt into the clean-ancilla Toffoli
+ladder.
+
 See `../notebooks/AJL-Compiler-Package-Demo.ipynb` for a complete walkthrough.

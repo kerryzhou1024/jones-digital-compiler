@@ -81,7 +81,7 @@ def test_clean_ancilla_mcx_and_workspace_cleanup(control_count: int) -> None:
     work = QuantumRegister(control_count - 2, "adder_work")
     semantic = QuantumCircuit(data, work)
     semantic.append(MCXGate(control_count), data)
-    lowered = SingleControlLowerer(Level3Policy()).lower(semantic)
+    lowered = SingleControlLowerer(Level3Policy(mcx=CleanAncillaMCX())).lower(semantic)
 
     control_mask = (1 << control_count) - 1
     for basis in range(1 << (control_count + 1)):
@@ -138,11 +138,11 @@ def test_mcx_rejects_invalid_work_allocations() -> None:
 
 def test_default_level_3_components_are_independent() -> None:
     policy = Level3Policy()
-    assert isinstance(policy.mcx, CleanAncillaMCX)
+    assert isinstance(policy.mcx, NoAncillaMCX)
     assert isinstance(policy.rotations, GrayCodeMCR)
     assert isinstance(policy.phases, RecursiveMCPhase)
 
 
-def test_standard_no_ancilla_policy_metadata() -> None:
-    policy = Level3Policy(mcx=NoAncillaMCX())
+def test_default_no_ancilla_policy_metadata() -> None:
+    policy = Level3Policy()
     assert policy.metadata()["mcx"] == "no_ancilla_recursive_phase"
