@@ -16,6 +16,49 @@ def work_register(circuit: QuantumCircuit) -> list:
     return [] if not matches else list(matches[0])
 
 
+def _mcx_work_lane(
+    circuit: QuantumCircuit,
+    target,
+    available_work: list,
+) -> list:
+    """Return lane-local work for compiler-generated height-register MCX gates."""
+
+    metadata = circuit.metadata or {}
+    lane_count = metadata.get("parallel_lanes")
+    selector_width = metadata.get("height_selector_qubits")
+    work_per_lane = metadata.get("workspace_qubits_per_lane")
+    if lane_count is None or selector_width is None or work_per_lane is None:
+        return available_work
+
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in (lane_count, selector_width, work_per_lane)
+    ):
+        raise ValueError("compiler lane metadata must contain integer widths")
+    if lane_count < 1 or selector_width < 1 or work_per_lane < 0:
+        raise ValueError("compiler lane metadata contains invalid widths")
+    if len(available_work) != lane_count * work_per_lane:
+        raise ValueError("adder_work size does not match compiler lane metadata")
+    if work_per_lane == 0:
+        return []
+
+    height_matches = [register for register in circuit.qregs if register.name == "height"]
+    if len(height_matches) != 1:
+        raise ValueError("a scheduled compiler circuit must contain one height register")
+    height = list(height_matches[0])
+    if len(height) != lane_count * selector_width:
+        raise ValueError("height size does not match compiler lane metadata")
+    try:
+        height_index = height.index(target)
+    except ValueError:
+        raise ValueError(
+            "a compiler-generated MCX must target a height-lane qubit"
+        ) from None
+    lane = height_index // selector_width
+    start = lane * work_per_lane
+    return available_work[start : start + work_per_lane]
+
+
 def assert_level_2_contract(circuit: QuantumCircuit) -> None:
     """Verify semantic gate families and idle lowering workspace at Level 2."""
 
@@ -139,7 +182,11 @@ class SingleControlLowerer:
                         level_3,
                         controls,
                         target,
-                        available_work,
+                        _mcx_work_lane(
+                            level_2_circuit,
+                            target,
+                            available_work,
+                        ),
                     )
                     continue
                 if base_name in {"rx", "ry", "rz"} and operation.num_ctrl_qubits >= 2:

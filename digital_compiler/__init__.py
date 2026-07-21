@@ -28,7 +28,10 @@ from .model import (
 )
 from .policies import (
     CleanAncillaMCX,
+    CommutingLayerScheduling,
     CompilerConfig,
+    GeneratorSchedule,
+    GeneratorSchedulingPolicy,
     GrayCodeMCR,
     HeightSynthesisPolicy,
     Level3Policy,
@@ -38,6 +41,7 @@ from .policies import (
     MultiplexedHeightSynthesis,
     NoAncillaMCX,
     RecursiveMCPhase,
+    SerialGeneratorScheduling,
     SwitchCaseHeightSynthesis,
 )
 from .primitives import (
@@ -72,11 +76,14 @@ __all__ = [
     "BraidGenerator",
     "BraidWord",
     "CleanAncillaMCX",
+    "CommutingLayerScheduling",
     "CompilerConfig",
     "DenseAJLReference",
     "EvaluationCircuitLevel",
     "EvaluationMethod",
     "GrayCodeMCR",
+    "GeneratorSchedule",
+    "GeneratorSchedulingPolicy",
     "HadamardComponentEstimate",
     "HadamardPart",
     "HadamardTestCompilation",
@@ -92,6 +99,7 @@ __all__ = [
     "QuantumAdder",
     "PathAmplitudeEstimate",
     "RecursiveMCPhase",
+    "SerialGeneratorScheduling",
     "SwitchCaseHeightSynthesis",
     "TOL",
     "DEFAULT_SHOTS",

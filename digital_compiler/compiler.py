@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -10,7 +11,7 @@ from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 
 from .lowering import SingleControlLowerer, assert_level_2_contract
 from .model import AJLPathModel, BraidGenerator, BraidWord, HadamardPart
-from .policies import CompilerConfig
+from .policies import CompilerConfig, GeneratorSchedule
 from .primitives import (
     QuantumAdder,
     append_hadamard_readout,
@@ -71,6 +72,10 @@ class HadamardTestCompilation:
     def height_policy_label(self) -> str:
         return self.config.height.name
 
+    @property
+    def scheduling_policy_label(self) -> str:
+        return self.config.scheduling.name
+
 
 class AJLCompiler:
     """Compile AJL braid words through explicit semantic and lowering layers."""
@@ -87,11 +92,17 @@ class AJLCompiler:
         self.height_selector_qubits = max(1, math.ceil(math.log2(self.level)))
         self.height_qubits = self.height_selector_qubits
         self.adder = QuantumAdder(self.height_qubits)
-        self.work_qubits = int(
+        self.parallel_lanes = self._validate_lane_capacity(
+            self.config.scheduling.lane_capacity(self.strands)
+        )
+        self.height_register_qubits = self.height_qubits * self.parallel_lanes
+        self.work_qubits_per_lane = int(
             self.config.level3.mcx.clean_ancillas(self.height_qubits)
         )
-        if self.work_qubits < 0:
+        if self.work_qubits_per_lane < 0:
             raise ValueError("an MCX policy cannot request negative workspace")
+        self.work_qubits = self.work_qubits_per_lane * self.parallel_lanes
+        self.control_fanout_qubits = self.parallel_lanes - 1
         self.lowerer = SingleControlLowerer(self.config.level3)
         (
             self.projector_basis_angles,
@@ -108,34 +119,79 @@ class AJLCompiler:
 
     @property
     def logical_qubits(self) -> int:
-        return 1 + self.strands + self.height_qubits + self.work_qubits
+        return (
+            1
+            + self.strands
+            + self.height_register_qubits
+            + self.work_qubits
+            + self.control_fanout_qubits
+        )
+
+    def _validate_lane_capacity(self, raw_capacity: object) -> int:
+        if isinstance(raw_capacity, bool):
+            raise ValueError("a scheduling policy lane capacity must be a positive integer")
+        try:
+            capacity = int(operator.index(raw_capacity))
+        except TypeError:
+            raise ValueError(
+                "a scheduling policy lane capacity must be a positive integer"
+            ) from None
+        theoretical_maximum = max(1, self.strands // 2)
+        if capacity < 1 or capacity > theoretical_maximum:
+            raise ValueError(
+                "a scheduling policy lane capacity must be in "
+                f"1..{theoretical_maximum} for {self.strands} strands"
+            )
+        return capacity
 
     def _config_metadata(self) -> dict[str, object]:
         metadata = self.config.metadata()
         metadata["workspace_qubits"] = self.work_qubits
+        metadata["workspace_qubits_per_lane"] = self.work_qubits_per_lane
+        metadata["height_selector_qubits"] = self.height_selector_qubits
+        metadata["height_register_qubits"] = self.height_register_qubits
+        metadata["parallel_lanes"] = self.parallel_lanes
+        metadata["control_fanout_qubits"] = self.control_fanout_qubits
         return metadata
 
     def _new_hadamard_circuit(self, name: str):
         control = QuantumRegister(1, "ctrl")
         path = QuantumRegister(self.strands, "path")
-        height = QuantumRegister(self.height_qubits, "height")
+        height = QuantumRegister(self.height_register_qubits, "height")
         work = QuantumRegister(self.work_qubits, "adder_work")
+        control_fanout = (
+            QuantumRegister(self.control_fanout_qubits, "ctrl_fanout")
+            if self.control_fanout_qubits
+            else None
+        )
         measurement = ClassicalRegister(1, "meas")
-        circuit = QuantumCircuit(control, path, height, work, measurement, name=name)
-        return circuit, control, path, height, work, measurement
+        registers = [control, path, height, work]
+        if control_fanout is not None:
+            registers.append(control_fanout)
+        circuit = QuantumCircuit(*registers, measurement, name=name)
+        fanout_qubits = [] if control_fanout is None else list(control_fanout)
+        return circuit, control, path, height, work, fanout_qubits, measurement
 
     def _new_braid_circuit(self, name: str, controlled: bool = False):
         registers = []
         control = None
+        control_fanout = None
         if controlled:
             control = QuantumRegister(1, "ctrl")
             registers.append(control)
         path = QuantumRegister(self.strands, "path")
-        height = QuantumRegister(self.height_qubits, "height")
+        height = QuantumRegister(self.height_register_qubits, "height")
         work = QuantumRegister(self.work_qubits, "adder_work")
         registers.extend([path, height, work])
+        if controlled and self.control_fanout_qubits:
+            control_fanout = QuantumRegister(
+                self.control_fanout_qubits,
+                "ctrl_fanout",
+            )
+            registers.append(control_fanout)
         circuit = QuantumCircuit(*registers, name=name)
-        return circuit, control, path, height, work
+        fanout_qubits = [] if control_fanout is None else list(control_fanout)
+        return circuit, control, path, height, work, fanout_qubits
 
     @staticmethod
     def validate_part(part: str) -> HadamardPart:
@@ -143,12 +199,142 @@ class AJLCompiler:
             raise ValueError("part must be 'real' or 'imag'")
         return part
 
+    def _schedule(self, word: BraidWord) -> GeneratorSchedule:
+        raw_schedule = self.config.scheduling.schedule(word, self.strands)
+        try:
+            raw_layers = tuple(raw_schedule)
+        except TypeError:
+            raise ValueError("a generator schedule must be an iterable of layers") from None
+
+        layers: list[tuple[int, ...]] = []
+        for raw_layer in raw_layers:
+            try:
+                raw_positions = tuple(raw_layer)
+            except TypeError:
+                raise ValueError("each generator schedule layer must be iterable") from None
+            if not raw_positions:
+                raise ValueError("generator schedule layers cannot be empty")
+            positions = []
+            for raw_position in raw_positions:
+                if isinstance(raw_position, bool):
+                    raise ValueError("generator schedule positions must be integers")
+                try:
+                    position = int(operator.index(raw_position))
+                except TypeError:
+                    raise ValueError(
+                        "generator schedule positions must be integers"
+                    ) from None
+                positions.append(position)
+            layers.append(tuple(positions))
+
+        schedule = tuple(layers)
+        self._validate_schedule(word, schedule)
+        return schedule
+
+    def _validate_schedule(
+        self,
+        word: BraidWord,
+        schedule: GeneratorSchedule,
+    ) -> None:
+        if any(len(layer) > self.parallel_lanes for layer in schedule):
+            raise ValueError(
+                "a generator schedule layer exceeds the configured lane capacity"
+            )
+
+        flattened = tuple(position for layer in schedule for position in layer)
+        expected_positions = tuple(range(word.crossings))
+        if any(
+            position < 0 or position >= word.crossings for position in flattened
+        ):
+            raise ValueError("a generator schedule position is out of range")
+        if len(flattened) != word.crossings or sorted(flattened) != list(
+            expected_positions
+        ):
+            raise ValueError(
+                "a generator schedule must contain every braid-word position exactly once"
+            )
+
+        layer_by_position: dict[int, int] = {}
+        for layer_index, layer in enumerate(schedule):
+            for position in layer:
+                layer_by_position[position] = layer_index
+            for left_offset, left_position in enumerate(layer):
+                left_index = word.generators[left_position].index
+                for right_position in layer[left_offset + 1 :]:
+                    right_index = word.generators[right_position].index
+                    if abs(left_index - right_index) < 2:
+                        raise ValueError(
+                            "generators in one schedule layer must be pairwise distant"
+                        )
+
+        for earlier_position, earlier in enumerate(word.generators):
+            for later_position in range(earlier_position + 1, word.crossings):
+                later = word.generators[later_position]
+                if (
+                    abs(earlier.index - later.index) <= 1
+                    and layer_by_position[earlier_position]
+                    >= layer_by_position[later_position]
+                ):
+                    raise ValueError(
+                        "a generator schedule cannot reorder noncommuting generators"
+                    )
+
+    def _schedule_metadata(
+        self,
+        word: BraidWord,
+        schedule: GeneratorSchedule,
+    ) -> dict[str, object]:
+        signed_layers = tuple(
+            tuple(word.generators[position].signed_index for position in layer)
+            for layer in schedule
+        )
+        return {
+            "generator_scheduling": self.config.scheduling.name,
+            "generator_layers": signed_layers,
+            "parallel_lanes": self.parallel_lanes,
+            "active_parallel_width": max((len(layer) for layer in schedule), default=0),
+            "height_selector_qubits": self.height_selector_qubits,
+            "workspace_qubits_per_lane": self.work_qubits_per_lane,
+        }
+
+    def _height_lane(self, height, lane: int) -> list:
+        start = lane * self.height_selector_qubits
+        stop = start + self.height_selector_qubits
+        return list(height[start:stop])
+
+    @staticmethod
+    def _append_control_fanout(circuit, control, fanout, width: int):
+        lane_controls = [control, *list(fanout)[: max(0, width - 1)]]
+        rounds = []
+        copied = 1
+        while copied < len(lane_controls):
+            new_count = min(copied, len(lane_controls) - copied)
+            pairs = tuple(
+                (lane_controls[offset], lane_controls[copied + offset])
+                for offset in range(new_count)
+            )
+            for source, target in pairs:
+                circuit.cx(source, target)
+            rounds.append(pairs)
+            copied += new_count
+        return tuple(lane_controls), tuple(rounds)
+
+    @staticmethod
+    def _append_control_unfanout(circuit, rounds) -> None:
+        for pairs in reversed(rounds):
+            for source, target in pairs:
+                circuit.cx(source, target)
+
     def controlled_varphi_gate(
         self,
         generator: BraidGenerator,
         include_workspace: bool = True,
     ):
-        workspace_qubits = self.height_qubits + self.work_qubits if include_workspace else 0
+        workspace_qubits = (
+            self.height_register_qubits + self.work_qubits
+            if include_workspace
+            else 0
+        )
         return controlled_varphi_gate(generator, self.strands + workspace_qubits)
 
     def _compute_prefix_height(self, circuit, path, height, index: int) -> None:
@@ -185,6 +371,51 @@ class AJLCompiler:
         )
         self._uncompute_prefix_height(circuit, path, height, generator.index)
 
+    def append_logical_layer(
+        self,
+        circuit,
+        path,
+        height,
+        word: BraidWord,
+        layer: tuple[int, ...],
+        lane_controls=(),
+    ) -> None:
+        controls = list(lane_controls)
+        for lane, position in enumerate(layer):
+            generator = word.generators[position]
+            self._compute_prefix_height(
+                circuit,
+                path,
+                self._height_lane(height, lane),
+                generator.index,
+            )
+
+        for lane, position in enumerate(layer):
+            generator = word.generators[position]
+            experiment_control = None if not controls else controls[lane]
+            extra_controls = (
+                () if experiment_control is None else (experiment_control,)
+            )
+            self.config.height.append_braid(
+                circuit,
+                self.model,
+                path,
+                self._height_lane(height, lane),
+                generator.index,
+                generator.sign,
+                self.projector_alignment_angles,
+                extra_controls=extra_controls,
+            )
+
+        for lane, position in reversed(tuple(enumerate(layer))):
+            generator = word.generators[position]
+            self._uncompute_prefix_height(
+                circuit,
+                path,
+                self._height_lane(height, lane),
+                generator.index,
+            )
+
     def lower_to_level_3(self, level_2_circuit: QuantumCircuit) -> QuantumCircuit:
         return self.lowerer.lower(level_2_circuit)
 
@@ -193,8 +424,9 @@ class AJLCompiler:
         word: BraidWord | str | Sequence[int],
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
+        schedule = self._schedule(braid_word)
         policy_name = self.config.height.name
-        circuit, _, path, height, _ = self._new_braid_circuit(
+        circuit, _, path, height, _, _ = self._new_braid_circuit(
             f"level_2_braid_{policy_name}({braid_word})",
             controlled=False,
         )
@@ -203,9 +435,10 @@ class AJLCompiler:
             "height_strategy": policy_name,
             "gate_contract": "ajl_multicontrolled",
             "compiler_config": self._config_metadata(),
+            **self._schedule_metadata(braid_word, schedule),
         }
-        for generator in braid_word.generators:
-            self.append_logical_generator(circuit, path, height, generator)
+        for layer in schedule:
+            self.append_logical_layer(circuit, path, height, braid_word, layer)
         assert_level_2_contract(circuit)
         return circuit
 
@@ -214,8 +447,9 @@ class AJLCompiler:
         word: BraidWord | str | Sequence[int],
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
+        schedule = self._schedule(braid_word)
         policy_name = self.config.height.name
-        circuit, control, path, height, _ = self._new_braid_circuit(
+        circuit, control, path, height, _, control_fanout = self._new_braid_circuit(
             f"controlled_level_2_braid_{policy_name}({braid_word})",
             controlled=True,
         )
@@ -224,15 +458,20 @@ class AJLCompiler:
             "height_strategy": policy_name,
             "gate_contract": "ajl_multicontrolled",
             "compiler_config": self._config_metadata(),
+            **self._schedule_metadata(braid_word, schedule),
         }
-        for generator in braid_word.generators:
-            self.append_logical_generator(
-                circuit,
-                path,
-                height,
-                generator,
-                experiment_control=control[0],
+        active_width = max((len(layer) for layer in schedule), default=0)
+        lane_controls, fanout_rounds = self._append_control_fanout(
+            circuit,
+            control[0],
+            control_fanout,
+            active_width,
+        )
+        for layer in schedule:
+            self.append_logical_layer(
+                circuit, path, height, braid_word, layer, lane_controls
             )
+        self._append_control_unfanout(circuit, fanout_rounds)
         assert_level_2_contract(circuit)
         return circuit
 
@@ -266,15 +505,23 @@ class AJLCompiler:
         measure: bool = True,
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
+        schedule = self._schedule(braid_word)
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
-        circuit, control, path, height, work, measurement = self._new_hadamard_circuit(
-            f"level_1_varphi_{part}"
-        )
+        (
+            circuit,
+            control,
+            path,
+            height,
+            work,
+            _,
+            measurement,
+        ) = self._new_hadamard_circuit(f"level_1_varphi_{part}")
         circuit.metadata = {
             "compiler_level": 1,
             "gate_contract": "ajl_varphi_blocks",
             "compiler_config": self._config_metadata(),
+            **self._schedule_metadata(braid_word, schedule),
         }
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
@@ -299,28 +546,40 @@ class AJLCompiler:
         measure: bool = True,
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
+        schedule = self._schedule(braid_word)
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
         policy_name = self.config.height.name
-        circuit, control, path, height, _, measurement = self._new_hadamard_circuit(
-            f"level_2_multicontrolled_{policy_name}_{part}"
-        )
+        (
+            circuit,
+            control,
+            path,
+            height,
+            _,
+            control_fanout,
+            measurement,
+        ) = self._new_hadamard_circuit(f"level_2_multicontrolled_{policy_name}_{part}")
         circuit.metadata = {
             "compiler_level": 2,
             "height_strategy": policy_name,
             "gate_contract": "ajl_multicontrolled",
             "compiler_config": self._config_metadata(),
+            **self._schedule_metadata(braid_word, schedule),
         }
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
-        for generator in braid_word.generators:
-            self.append_logical_generator(
-                circuit,
-                path,
-                height,
-                generator,
-                experiment_control=control[0],
+        active_width = max((len(layer) for layer in schedule), default=0)
+        lane_controls, fanout_rounds = self._append_control_fanout(
+            circuit,
+            control[0],
+            control_fanout,
+            active_width,
+        )
+        for layer in schedule:
+            self.append_logical_layer(
+                circuit, path, height, braid_word, layer, lane_controls
             )
+        self._append_control_unfanout(circuit, fanout_rounds)
         append_hadamard_readout(
             circuit,
             control[0],

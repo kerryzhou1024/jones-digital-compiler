@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
+import operator
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from qiskit import QuantumCircuit
 from qiskit.circuit.library import RXGate, RYGate, RZGate
 
-from .model import TOL, AJLPathModel
+from .model import TOL, AJLPathModel, BraidWord
 from .primitives import (
     RotationAxis,
     append_fixed_height_braid,
@@ -19,6 +20,98 @@ from .primitives import (
     append_uniformly_controlled_rotation,
     append_uniformly_controlled_ry,
 )
+
+GeneratorSchedule = tuple[tuple[int, ...], ...]
+
+
+class GeneratorSchedulingPolicy(Protocol):
+    """Strategy for assigning braid-word positions to executable layers."""
+
+    name: str
+
+    def lane_capacity(self, strands: int) -> int: ...
+
+    def schedule(self, word: BraidWord, strands: int) -> GeneratorSchedule: ...
+
+    def metadata(self) -> dict[str, object]: ...
+
+
+@dataclass(frozen=True)
+class SerialGeneratorScheduling:
+    """Preserve the braid word exactly, one generator per layer."""
+
+    name: str = "serial"
+
+    @staticmethod
+    def lane_capacity(strands: int) -> int:
+        del strands
+        return 1
+
+    @staticmethod
+    def schedule(word: BraidWord, strands: int) -> GeneratorSchedule:
+        del strands
+        return tuple((position,) for position in range(word.crossings))
+
+    def metadata(self) -> dict[str, object]:
+        return {"name": self.name, "max_lanes": 1}
+
+
+@dataclass(frozen=True)
+class CommutingLayerScheduling:
+    """ASAP scheduling of pairwise-distant braid generators."""
+
+    max_lanes: int | None = None
+    name: str = "commuting_layers"
+
+    def __post_init__(self) -> None:
+        if self.max_lanes is None:
+            return
+        if isinstance(self.max_lanes, bool):
+            raise ValueError("max_lanes must be a positive integer or None")
+        try:
+            value = int(operator.index(self.max_lanes))
+        except TypeError:
+            raise ValueError("max_lanes must be a positive integer or None") from None
+        if value <= 0:
+            raise ValueError("max_lanes must be a positive integer or None")
+        object.__setattr__(self, "max_lanes", value)
+
+    def lane_capacity(self, strands: int) -> int:
+        theoretical_maximum = max(1, int(strands) // 2)
+        if self.max_lanes is None:
+            return theoretical_maximum
+        return min(self.max_lanes, theoretical_maximum)
+
+    def schedule(self, word: BraidWord, strands: int) -> GeneratorSchedule:
+        capacity = self.lane_capacity(strands)
+        layers: list[list[int]] = []
+        last_layer_by_index: dict[int, int] = {}
+
+        for position, generator in enumerate(word.generators):
+            predecessors = [
+                last_layer_by_index[index]
+                for index in (
+                    generator.index - 1,
+                    generator.index,
+                    generator.index + 1,
+                )
+                if index in last_layer_by_index
+            ]
+            layer_index = 0 if not predecessors else 1 + max(predecessors)
+            while True:
+                while len(layers) <= layer_index:
+                    layers.append([])
+                if len(layers[layer_index]) < capacity:
+                    break
+                layer_index += 1
+
+            layers[layer_index].append(position)
+            last_layer_by_index[generator.index] = layer_index
+
+        return tuple(tuple(layer) for layer in layers)
+
+    def metadata(self) -> dict[str, object]:
+        return {"name": self.name, "max_lanes": self.max_lanes}
 
 
 class HeightSynthesisPolicy(Protocol):
@@ -360,9 +453,13 @@ class CompilerConfig:
 
     height: HeightSynthesisPolicy = field(default_factory=MultiplexedHeightSynthesis)
     level3: Level3Policy = field(default_factory=Level3Policy)
+    scheduling: GeneratorSchedulingPolicy = field(
+        default_factory=SerialGeneratorScheduling
+    )
 
     def metadata(self) -> dict[str, object]:
         return {
             "height_synthesis": self.height.name,
             "level_3": self.level3.metadata(),
+            "generator_scheduling": self.scheduling.metadata(),
         }

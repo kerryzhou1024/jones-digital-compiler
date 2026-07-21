@@ -126,6 +126,7 @@ def level_3_gate_family_counts(circuit: QuantumCircuit) -> dict[str, int]:
 
 
 def compilation_summary(compilation: HadamardTestCompilation) -> dict[str, object]:
+    level_2_metadata = compilation.level_2_multicontrolled.metadata or {}
     level_3_metadata = compilation.level_3_single_control.metadata or {}
     return {
         "word": str(compilation.word),
@@ -133,6 +134,10 @@ def compilation_summary(compilation: HadamardTestCompilation) -> dict[str, objec
         "initial_path": compilation.path_label,
         "part": compilation.part,
         "height_strategy": compilation.height_policy_label,
+        "generator_scheduling": compilation.scheduling_policy_label,
+        "generator_layers": level_2_metadata.get("generator_layers"),
+        "parallel_lanes": level_2_metadata.get("parallel_lanes"),
+        "active_parallel_width": level_2_metadata.get("active_parallel_width"),
         "level_1_compiler_level": compilation.level_1_varphi.metadata.get("compiler_level"),
         "level_2_compiler_level": compilation.level_2_multicontrolled.metadata.get(
             "compiler_level"
