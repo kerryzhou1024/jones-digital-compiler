@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from html import escape
 
 from IPython.display import HTML, display
 from qiskit import QuantumCircuit
+
+from .model import HadamardPart
+from .problem import CircuitLevelSelection, JonesProblem
 
 
 def show_scrollable_circuit(
@@ -52,3 +56,36 @@ def show_scrollable_circuit(
             """
         )
     )
+
+
+def show_problem_circuits(
+    problem: JonesProblem,
+    *,
+    title: str | None = None,
+    path: str | Sequence[int] | None = None,
+    part: HadamardPart | None = None,
+    circuit_level: CircuitLevelSelection = 3,
+    measure: bool = False,
+    max_lines: int | None = None,
+) -> None:
+    """Display a filtered problem workload without retaining its circuits."""
+
+    base_title = (
+        title
+        if title is not None
+        else f"{problem.closure.title()} closure — {problem.word}"
+    )
+    for compiled in problem.circuits(
+        path=path,
+        part=part,
+        circuit_level=circuit_level,
+        measure=measure,
+    ):
+        show_scrollable_circuit(
+            compiled.circuit,
+            (
+                f"{base_title} — path |{compiled.path_label}> — "
+                f"{compiled.part} — Level {compiled.circuit_level}"
+            ),
+            max_lines=max_lines,
+        )

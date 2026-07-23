@@ -6,6 +6,7 @@ import math
 import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 
@@ -24,6 +25,8 @@ LEVEL_4_STATUS = (
     "tolerance, and error-allocation policy before producing logical Clifford+T. "
     "Surface-code mapping and scheduling are downstream tasks."
 )
+
+CompilerLevel = Literal[1, 2, 3]
 
 
 def register_signature(
@@ -609,11 +612,47 @@ class AJLCompiler:
         )
         return level_3
 
+    def compile_component(
+        self,
+        word: BraidWord | str | Sequence[int],
+        initial_path: str | Sequence[int],
+        part: HadamardPart,
+        *,
+        circuit_level: CompilerLevel = 3,
+        measure: bool = True,
+    ) -> QuantumCircuit:
+        """Compile one real or imaginary Hadamard-test circuit at one level."""
+
+        if circuit_level == 1:
+            return self.level_1_varphi_circuit(
+                word,
+                initial_path,
+                part,
+                measure=measure,
+            )
+        if circuit_level == 2:
+            return self.level_2_multicontrolled_circuit(
+                word,
+                initial_path,
+                part,
+                measure=measure,
+            )
+        if circuit_level == 3:
+            return self.level_3_single_control_circuit(
+                word,
+                initial_path,
+                part,
+                measure=measure,
+            )
+        raise ValueError("circuit_level must be 1, 2, or 3")
+
     def compile_hadamard_test(
         self,
         word: BraidWord | str | Sequence[int],
         initial_path: str | Sequence[int],
         part: HadamardPart = "real",
+        *,
+        measure: bool = True,
     ) -> HadamardTestCompilation:
         braid_word = self.model.as_braid_word(word)
         path_bits = self.model.coerce_path(initial_path)
@@ -622,7 +661,7 @@ class AJLCompiler:
             braid_word,
             path_bits,
             part,
-            measure=True,
+            measure=measure,
         )
         level_3 = self.lower_to_level_3(level_2)
         level_3.name = level_2.name.replace(
@@ -637,7 +676,7 @@ class AJLCompiler:
                 braid_word,
                 path_bits,
                 part,
-                measure=True,
+                measure=measure,
             ),
             level_2_multicontrolled=level_2,
             level_3_single_control=level_3,

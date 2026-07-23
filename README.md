@@ -36,38 +36,79 @@ pytest
 ## Basic Usage
 
 ```python
-from digital_compiler import AJLCompiler, AJLPathModel, CompilerConfig
+from digital_compiler import JonesProblem
 
-model = AJLPathModel(strands=2, level=5)
-compiler = AJLCompiler(model, CompilerConfig())
-result = compiler.compile_hadamard_test("s1^2", "10", part="real")
+problem = JonesProblem(
+    "s1^2",
+    closure="trace",
+    strands=2,
+    k=5,
+)
+
+exact = problem.evaluate()
+real_level_3 = problem.circuit(part="real", circuit_level=3)
+all_levels = problem.compile("10", "real")
+
+real_level_3.display(title="Hopf real — Level 3", max_lines=12)
 ```
 
-The compiler itself produces a path amplitude and is independent of how the
-braid will be closed. For an even-strand plat closure, the required path is
-available directly from the model:
+The façade exposes all valid AJL paths and the subset required by its closure:
 
 ```python
-plat_result = compiler.compile_hadamard_test("s1", model.plat_path())
+print(problem.valid_paths)
+print(problem.evaluation_paths)
+
+for compiled in problem.circuits(
+    path="10",
+    part="real",
+    circuit_level="all",
+):
+    print(compiled.circuit_level, compiled.depth())
 ```
 
-## One-Call Jones Evaluation
+`circuit()` and `circuits()` return `CompiledCircuit` records. They print as
+Qiskit circuit drawings, display themselves in notebooks with `.display()`,
+forward common circuit attributes, and expose the raw Qiskit object as
+`.circuit`.
 
-`evaluate_jones` uses every valid path for trace closure by default. Select a
-plat closure to evaluate only `|1010...10>`:
+When `path` is omitted from a singular `circuit()` call, the façade uses
+`problem.valid_paths[0]`. Omitting `path` from plural `circuits()` still selects
+the complete closure workload.
+
+In a notebook, display the complete workload without retaining it:
 
 ```python
-from digital_compiler import evaluate_jones
+from digital_compiler.notebook import show_problem_circuits
 
-plat = evaluate_jones(
+show_problem_circuits(
+    problem,
+    title="Trace Hopf",
+    path="10",
+    part="real",
+    circuit_level="all",
+)
+```
+
+`AJLPathModel`, `AJLCompiler`, and `AJLJonesEvaluator` remain available as the
+advanced reusable engines underneath this API.
+
+## Trace and Plat Evaluation
+
+Select a plat closure to evaluate only `|1010...10>`:
+
+```python
+from digital_compiler import JonesProblem
+
+plat = JonesProblem(
     "s1",
     strands=2,
     k=5,
     closure="plat",
-    plat_writhe=-1,
+    writhe=-1,
 )
 
-print(plat.value)
+print(plat.evaluate().value)
+print(plat.reference_value())
 ```
 
 Plat closure requires an even number of strands. Supply the writhe of the
@@ -89,17 +130,16 @@ layers:
 
 ```python
 from digital_compiler import (
-    AJLCompiler,
-    AJLPathModel,
     CommutingLayerScheduling,
     CompilerConfig,
+    JonesProblem,
 )
 
 config = CompilerConfig(
     scheduling=CommutingLayerScheduling(max_lanes=None),
 )
-compiler = AJLCompiler(AJLPathModel(strands=4, level=5), config)
-compilation = compiler.compile_hadamard_test("1 3", "1010")
+problem = JonesProblem("1 3", strands=4, k=5, config=config)
+compilation = problem.compile("1010", "real")
 ```
 
 `max_lanes=None` reserves up to `strands // 2` lanes; a positive integer caps
@@ -113,4 +153,4 @@ compiler validates that a custom scheduling policy neither loses generators
 nor reorders a noncommuting pair. Prefix-height computation may still limit the
 depth improvement when simultaneous generators have overlapping prefixes.
 
-See `../notebooks/AJL-Compiler-Package-Demo.ipynb` for a complete walkthrough.
+See `../notebooks/compiler-demo.ipynb` for a complete walkthrough.

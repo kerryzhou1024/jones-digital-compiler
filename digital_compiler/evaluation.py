@@ -13,13 +13,45 @@ from qiskit.primitives import BaseSamplerV2, StatevectorSampler
 from qiskit.quantum_info import Statevector
 
 from .compiler import AJLCompiler
-from .model import AJLPathModel, BraidWord
+from .model import AJLPathModel, BraidWord, HadamardPart
 from .policies import CompilerConfig
 
 EvaluationMethod = Literal["statevector", "shots"]
 EvaluationCircuitLevel = Literal[2, 3]
 ClosureType = Literal["trace", "plat"]
 DEFAULT_SHOTS = 4096
+
+
+@dataclass(frozen=True)
+class CircuitTask:
+    """One path/component circuit required by a Jones evaluation."""
+
+    path: tuple[int, ...]
+    part: HadamardPart
+
+    @property
+    def path_label(self) -> str:
+        return "".join(str(bit) for bit in self.path)
+
+
+def circuit_tasks(
+    paths: Sequence[tuple[int, ...]],
+    *,
+    part: HadamardPart | None = None,
+) -> tuple[CircuitTask, ...]:
+    """Expand paths into deterministic, optionally filtered component tasks."""
+
+    if part is None:
+        parts: tuple[HadamardPart, ...] = ("real", "imag")
+    elif part == "real" or part == "imag":
+        parts = (part,)
+    else:
+        raise ValueError("part must be 'real' or 'imag'")
+    return tuple(
+        CircuitTask(path=path, part=selected_part)
+        for path in paths
+        for selected_part in parts
+    )
 
 
 @dataclass(frozen=True)
@@ -52,6 +84,110 @@ class PathAmplitudeEstimate:
     @property
     def amplitude(self) -> complex:
         return complex(self.real.expectation, self.imag.expectation)
+
+
+@dataclass(frozen=True)
+class _TraceClosure:
+    kind: Literal["trace"] = "trace"
+    writhe: None = None
+
+    @staticmethod
+    def paths(model: AJLPathModel) -> tuple[tuple[int, ...], ...]:
+        return model.valid_paths()
+
+    @staticmethod
+    def evaluate(
+        model: AJLPathModel,
+        word: BraidWord,
+        amplitudes: Mapping[tuple[int, ...], complex],
+    ) -> tuple[complex, complex]:
+        markov_trace = model.markov_trace(amplitudes)
+        return markov_trace, model.trace_closure_jones(word, amplitudes)
+
+    @staticmethod
+    def raw_component_variances(
+        estimates: tuple[PathAmplitudeEstimate, ...],
+    ) -> tuple[float, float]:
+        total_weight = math.fsum(estimate.endpoint_weight for estimate in estimates)
+        return (
+            math.fsum(
+                (estimate.endpoint_weight / total_weight) ** 2
+                * estimate.real.standard_error**2
+                for estimate in estimates
+            ),
+            math.fsum(
+                (estimate.endpoint_weight / total_weight) ** 2
+                * estimate.imag.standard_error**2
+                for estimate in estimates
+            ),
+        )
+
+    @staticmethod
+    def normalization_factor(model: AJLPathModel, word: BraidWord) -> complex:
+        factor = (-(model.A**3)) ** word.writhe
+        return complex(factor * model.d ** (model.strands - 1))
+
+
+@dataclass(frozen=True)
+class _PlatClosure:
+    writhe: int
+    kind: Literal["plat"] = "plat"
+
+    @staticmethod
+    def paths(model: AJLPathModel) -> tuple[tuple[int, ...], ...]:
+        return (model.plat_path(),)
+
+    def evaluate(
+        self,
+        model: AJLPathModel,
+        word: BraidWord,
+        amplitudes: Mapping[tuple[int, ...], complex],
+    ) -> tuple[None, complex]:
+        del word
+        amplitude = amplitudes[model.plat_path()]
+        return None, model.plat_closure_jones(amplitude, writhe=self.writhe)
+
+    @staticmethod
+    def raw_component_variances(
+        estimates: tuple[PathAmplitudeEstimate, ...],
+    ) -> tuple[float, float]:
+        estimate = estimates[0]
+        return (
+            estimate.real.standard_error**2,
+            estimate.imag.standard_error**2,
+        )
+
+    def normalization_factor(self, model: AJLPathModel, word: BraidWord) -> complex:
+        del word
+        return model.plat_closure_jones(1.0, writhe=self.writhe)
+
+
+ClosureSpec = _TraceClosure | _PlatClosure
+
+
+def _normalize_closure(
+    closure: object,
+    writhe: object,
+    *,
+    writhe_name: str = "writhe",
+) -> ClosureSpec:
+    if closure != "trace" and closure != "plat":
+        raise ValueError("closure must be 'trace' or 'plat'")
+    if closure == "trace":
+        if writhe is not None:
+            raise ValueError(
+                f"{writhe_name} can only be specified for plat closure"
+            )
+        return _TraceClosure()
+    if writhe is None:
+        raise ValueError(f"{writhe_name} is required for plat closure")
+    if isinstance(writhe, bool):
+        raise ValueError(f"{writhe_name} must be an integer")
+    try:
+        normalized_writhe = int(operator.index(writhe))
+    except TypeError:
+        raise ValueError(f"{writhe_name} must be an integer") from None
+    return _PlatClosure(normalized_writhe)
 
 
 @dataclass(frozen=True)
@@ -110,29 +246,6 @@ class AJLJonesEvaluator:
         self.config = CompilerConfig() if config is None else config
         self.compiler = AJLCompiler(model, self.config)
 
-    def _hadamard_circuit(
-        self,
-        word: BraidWord,
-        path: tuple[int, ...],
-        part: Literal["real", "imag"],
-        circuit_level: EvaluationCircuitLevel,
-        *,
-        measure: bool,
-    ):
-        if circuit_level == 2:
-            return self.compiler.level_2_multicontrolled_circuit(
-                word,
-                path,
-                part,
-                measure=measure,
-            )
-        return self.compiler.level_3_single_control_circuit(
-            word,
-            path,
-            part,
-            measure=measure,
-        )
-
     @staticmethod
     def _statevector_component(circuit) -> HadamardComponentEstimate:
         state = Statevector.from_instruction(circuit)
@@ -174,53 +287,48 @@ class AJLJonesEvaluator:
     def _statevector_estimates(
         self,
         word: BraidWord,
-        paths: tuple[tuple[int, ...], ...],
+        tasks: tuple[CircuitTask, ...],
         circuit_level: EvaluationCircuitLevel,
     ) -> dict[tuple[tuple[int, ...], str], HadamardComponentEstimate]:
         estimates = {}
-        for path in paths:
-            for part in ("real", "imag"):
-                circuit = self._hadamard_circuit(
-                    word,
-                    path,
-                    part,
-                    circuit_level,
-                    measure=False,
-                )
-                estimates[(path, part)] = self._statevector_component(circuit)
+        for task in tasks:
+            circuit = self.compiler.compile_component(
+                word,
+                task.path,
+                task.part,
+                circuit_level=circuit_level,
+                measure=False,
+            )
+            estimates[(task.path, task.part)] = self._statevector_component(circuit)
         return estimates
 
     def _sampled_estimates(
         self,
         word: BraidWord,
-        paths: tuple[tuple[int, ...], ...],
+        tasks: tuple[CircuitTask, ...],
         circuit_level: EvaluationCircuitLevel,
         shots: int,
         sampler: BaseSamplerV2,
     ) -> dict[tuple[tuple[int, ...], str], HadamardComponentEstimate]:
-        labels = []
-        circuits = []
-        for path in paths:
-            for part in ("real", "imag"):
-                labels.append((path, part))
-                circuits.append(
-                    self._hadamard_circuit(
-                        word,
-                        path,
-                        part,
-                        circuit_level,
-                        measure=True,
-                    )
-                )
+        circuits = [
+            self.compiler.compile_component(
+                word,
+                task.path,
+                task.part,
+                circuit_level=circuit_level,
+                measure=True,
+            )
+            for task in tasks
+        ]
 
         results = sampler.run(circuits, shots=shots).result()
-        if len(results) != len(labels):
+        if len(results) != len(tasks):
             raise ValueError(
-                f"sampler returned {len(results)} results for {len(labels)} circuits"
+                f"sampler returned {len(results)} results for {len(tasks)} circuits"
             )
         return {
-            label: self._sampled_component(pub_result)
-            for label, pub_result in zip(labels, results, strict=True)
+            (task.path, task.part): self._sampled_component(pub_result)
+            for task, pub_result in zip(tasks, results, strict=True)
         }
 
     def evaluate(
@@ -242,14 +350,14 @@ class AJLJonesEvaluator:
         if circuit_level not in {2, 3}:
             raise ValueError("circuit_level must be 2 or 3")
 
-        normalized_plat_writhe = _validate_closure_options(closure, plat_writhe)
-
         braid_word = self.model.as_braid_word(word)
-        paths = (
-            self.model.valid_paths()
-            if closure == "trace"
-            else (self.model.plat_path(),)
+        closure_spec = _normalize_closure(
+            closure,
+            plat_writhe,
+            writhe_name="plat_writhe",
         )
+        paths = closure_spec.paths(self.model)
+        tasks = circuit_tasks(paths)
         sampler_name = None
         shots_per_circuit = None
 
@@ -262,7 +370,7 @@ class AJLJonesEvaluator:
                 raise ValueError("sampler can only be specified when method='shots'")
             components = self._statevector_estimates(
                 braid_word,
-                paths,
+                tasks,
                 circuit_level,
             )
         else:
@@ -283,7 +391,7 @@ class AJLJonesEvaluator:
             sampler_name = type(active_sampler).__name__
             components = self._sampled_estimates(
                 braid_word,
-                paths,
+                tasks,
                 circuit_level,
                 shots_per_circuit,
                 active_sampler,
@@ -301,20 +409,15 @@ class AJLJonesEvaluator:
         amplitudes = {
             estimate.path: estimate.amplitude for estimate in path_estimates
         }
-        if closure == "trace":
-            markov_trace = self.model.markov_trace(amplitudes)
-            value = self.model.trace_closure_jones(braid_word, amplitudes)
-        else:
-            markov_trace = None
-            value = self.model.plat_closure_jones(
-                path_estimates[0].amplitude,
-                writhe=normalized_plat_writhe,
-            )
+        markov_trace, value = closure_spec.evaluate(
+            self.model,
+            braid_word,
+            amplitudes,
+        )
         real_error, imag_error = self._propagate_standard_errors(
             braid_word,
             path_estimates,
-            closure,
-            normalized_plat_writhe,
+            closure_spec,
         )
         total_shots = sum(
             estimate.real.shots + estimate.imag.shots
@@ -323,8 +426,8 @@ class AJLJonesEvaluator:
         return JonesEvaluation(
             model=self.model,
             word=braid_word,
-            closure=closure,
-            plat_writhe=normalized_plat_writhe,
+            closure=closure_spec.kind,
+            plat_writhe=closure_spec.writhe,
             method=method,
             circuit_level=circuit_level,
             config=self.config,
@@ -333,7 +436,7 @@ class AJLJonesEvaluator:
             value=value,
             real_standard_error=real_error,
             imag_standard_error=imag_error,
-            circuit_count=2 * len(paths),
+            circuit_count=len(tasks),
             shots_per_circuit=shots_per_circuit,
             total_shots=total_shots,
             sampler_name=sampler_name,
@@ -343,33 +446,12 @@ class AJLJonesEvaluator:
         self,
         word: BraidWord,
         estimates: tuple[PathAmplitudeEstimate, ...],
-        closure: ClosureType,
-        plat_writhe: int | None,
+        closure: ClosureSpec,
     ) -> tuple[float, float]:
-        if closure == "trace":
-            total_weight = math.fsum(
-                estimate.endpoint_weight for estimate in estimates
-            )
-            raw_real_variance = math.fsum(
-                (estimate.endpoint_weight / total_weight) ** 2
-                * estimate.real.standard_error**2
-                for estimate in estimates
-            )
-            raw_imag_variance = math.fsum(
-                (estimate.endpoint_weight / total_weight) ** 2
-                * estimate.imag.standard_error**2
-                for estimate in estimates
-            )
-            closure_factor = (-(self.model.A**3)) ** word.writhe
-            closure_factor *= self.model.d ** (self.model.strands - 1)
-        else:
-            estimate = estimates[0]
-            raw_real_variance = estimate.real.standard_error**2
-            raw_imag_variance = estimate.imag.standard_error**2
-            closure_factor = self.model.plat_closure_jones(
-                1.0,
-                writhe=plat_writhe,
-            )
+        raw_real_variance, raw_imag_variance = (
+            closure.raw_component_variances(estimates)
+        )
+        closure_factor = closure.normalization_factor(self.model, word)
 
         real_variance = (
             closure_factor.real**2 * raw_real_variance
@@ -380,26 +462,6 @@ class AJLJonesEvaluator:
             + closure_factor.real**2 * raw_imag_variance
         )
         return math.sqrt(real_variance), math.sqrt(imag_variance)
-
-
-def _validate_closure_options(
-    closure: object,
-    plat_writhe: object,
-) -> int | None:
-    if closure not in {"trace", "plat"}:
-        raise ValueError("closure must be 'trace' or 'plat'")
-    if closure == "trace":
-        if plat_writhe is not None:
-            raise ValueError("plat_writhe can only be specified for plat closure")
-        return None
-    if plat_writhe is None:
-        raise ValueError("plat_writhe is required for plat closure")
-    if isinstance(plat_writhe, bool):
-        raise ValueError("plat_writhe must be an integer")
-    try:
-        return int(operator.index(plat_writhe))
-    except TypeError:
-        raise ValueError("plat_writhe must be an integer") from None
 
 
 def _positive_shots(value: object) -> int:
@@ -430,14 +492,21 @@ def evaluate_jones(
 ) -> JonesEvaluation:
     """Numerically evaluate a trace- or plat-closure Jones value."""
 
-    evaluator = AJLJonesEvaluator(
-        AJLPathModel(strands=strands, level=k),
-        config,
+    from .problem import JonesProblem
+
+    _normalize_closure(
+        closure,
+        plat_writhe,
+        writhe_name="plat_writhe",
     )
-    return evaluator.evaluate(
+    return JonesProblem(
         word,
+        strands=strands,
+        k=k,
         closure=closure,
-        plat_writhe=plat_writhe,
+        writhe=plat_writhe,
+        config=config,
+    ).evaluate(
         method=method,
         circuit_level=circuit_level,
         shots=shots,

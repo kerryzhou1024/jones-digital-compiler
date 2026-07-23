@@ -3,6 +3,7 @@
 from .compiler import (
     LEVEL_4_STATUS,
     AJLCompiler,
+    CompilerLevel,
     HadamardTestCompilation,
     register_signature,
 )
@@ -60,6 +61,7 @@ from .primitives import (
     gray_code_rotation_angles,
     prepare_basis_path,
 )
+from .problem import CircuitLevelSelection, CompiledCircuit, JonesProblem
 from .reference import DenseAJLReference
 from .reporting import (
     circuit_gate_count_depth,
@@ -79,7 +81,10 @@ __all__ = [
     "CleanAncillaMCX",
     "ClosureType",
     "CommutingLayerScheduling",
+    "CircuitLevelSelection",
+    "CompiledCircuit",
     "CompilerConfig",
+    "CompilerLevel",
     "DenseAJLReference",
     "EvaluationCircuitLevel",
     "EvaluationMethod",
@@ -93,6 +98,7 @@ __all__ = [
     "LEVEL_4_STATUS",
     "Level3Policy",
     "JonesEvaluation",
+    "JonesProblem",
     "MCPhaseDecomposer",
     "MCRDecomposer",
     "MCXDecomposer",
