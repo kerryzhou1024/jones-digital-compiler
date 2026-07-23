@@ -1,6 +1,6 @@
 """Non-dense AJL mathematics and braid-word domain objects.
 
-The model owns path rules, local blocks, endpoint weights, and trace-closure
+The model owns path rules, local blocks, endpoint weights, and closure
 normalization.  It never constructs a full path-space matrix, and potentially
 expensive valid-path enumeration occurs only when explicitly requested.
 """
@@ -123,6 +123,8 @@ class BraidWord:
 
     @property
     def writhe(self) -> int:
+        """Return the braid exponent sum, equal to the standard trace writhe."""
+
         return sum(generator.sign for generator in self.generators)
 
     @property
@@ -242,6 +244,13 @@ class AJLPathModel:
         visit(0, 1, ())
         return tuple(paths)
 
+    def plat_path(self) -> tuple[int, ...]:
+        """Return the alternating AJL path used for an even-strand plat closure."""
+
+        if self.strands % 2:
+            raise ValueError("plat closure requires an even number of strands")
+        return (1, 0) * (self.strands // 2)
+
     def endpoint_vertex(self, path: str | Sequence[int]) -> int:
         """Return the terminal graph vertex of one complete valid path."""
 
@@ -357,6 +366,15 @@ class AJLPathModel:
         normalization = (-(self.A**3)) ** braid_word.writhe
         normalization *= self.d ** (self.strands - 1)
         return complex(normalization * markov_trace)
+
+    def plat_closure_jones(self, amplitude: complex, *, writhe: int) -> complex:
+        """Return an oriented plat-closure Jones value from its single amplitude."""
+
+        self.plat_path()
+        plat_writhe = _coerce_integer(writhe, "writhe")
+        normalization = (-(self.A**3)) ** plat_writhe
+        normalization *= self.d ** (self.strands // 2 - 1)
+        return complex(normalization * complex(amplitude))
 
 
 def clean_complex(value: complex, tol: float = TOL) -> complex:

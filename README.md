@@ -43,6 +43,38 @@ compiler = AJLCompiler(model, CompilerConfig())
 result = compiler.compile_hadamard_test("s1^2", "10", part="real")
 ```
 
+The compiler itself produces a path amplitude and is independent of how the
+braid will be closed. For an even-strand plat closure, the required path is
+available directly from the model:
+
+```python
+plat_result = compiler.compile_hadamard_test("s1", model.plat_path())
+```
+
+## One-Call Jones Evaluation
+
+`evaluate_jones` uses every valid path for trace closure by default. Select a
+plat closure to evaluate only `|1010...10>`:
+
+```python
+from digital_compiler import evaluate_jones
+
+plat = evaluate_jones(
+    "s1",
+    strands=2,
+    k=5,
+    closure="plat",
+    plat_writhe=-1,
+)
+
+print(plat.value)
+```
+
+Plat closure requires an even number of strands. Supply the writhe of the
+chosen oriented plat diagram explicitly: unlike the standard trace orientation,
+it need not equal the braid word's exponent sum. The normalization follows the
+[AJL plat-closure formula](../references/literature/0511096v2.pdf).
+
 The default Level 3 policy uses exact no-ancilla MCX lowering through recursive
 phase decomposition and Gray-code multiplexed rotations. Use
 `Level3Policy(mcx=CleanAncillaMCX())` to opt into the clean-ancilla Toffoli

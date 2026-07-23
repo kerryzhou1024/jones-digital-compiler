@@ -1,4 +1,4 @@
-"""One-call circuit-based evaluation of AJL trace closures."""
+"""One-call circuit-based evaluation of AJL trace and plat closures."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from .policies import CompilerConfig
 
 EvaluationMethod = Literal["statevector", "shots"]
 EvaluationCircuitLevel = Literal[2, 3]
+ClosureType = Literal["trace", "plat"]
 DEFAULT_SHOTS = 4096
 
 
@@ -59,11 +60,13 @@ class JonesEvaluation:
 
     model: AJLPathModel
     word: BraidWord
+    closure: ClosureType
+    plat_writhe: int | None
     method: EvaluationMethod
     circuit_level: EvaluationCircuitLevel
     config: CompilerConfig
     path_estimates: tuple[PathAmplitudeEstimate, ...]
-    markov_trace: complex
+    markov_trace: complex | None
     value: complex
     real_standard_error: float
     imag_standard_error: float
@@ -86,9 +89,17 @@ class JonesEvaluation:
             {estimate.path: estimate.amplitude for estimate in self.path_estimates}
         )
 
+    @property
+    def plat_amplitude(self) -> complex | None:
+        """Return the single plat matrix element, or ``None`` for trace closure."""
+
+        if self.closure != "plat" or len(self.path_estimates) != 1:
+            return None
+        return self.path_estimates[0].amplitude
+
 
 class AJLJonesEvaluator:
-    """Evaluate small AJL trace closures by executing compiled Hadamard circuits."""
+    """Evaluate small AJL closures by executing compiled Hadamard circuits."""
 
     def __init__(
         self,
@@ -216,21 +227,29 @@ class AJLJonesEvaluator:
         self,
         word: BraidWord | str | Sequence[int],
         *,
+        closure: ClosureType = "trace",
+        plat_writhe: int | None = None,
         method: EvaluationMethod = "statevector",
         circuit_level: EvaluationCircuitLevel = 3,
         shots: int | None = None,
         seed: int | None = None,
         sampler: BaseSamplerV2 | None = None,
     ) -> JonesEvaluation:
-        """Evaluate the numerical Jones value of a braid's trace closure."""
+        """Evaluate the numerical Jones value of a braid closure."""
 
         if method not in {"statevector", "shots"}:
             raise ValueError("method must be 'statevector' or 'shots'")
         if circuit_level not in {2, 3}:
             raise ValueError("circuit_level must be 2 or 3")
 
+        normalized_plat_writhe = _validate_closure_options(closure, plat_writhe)
+
         braid_word = self.model.as_braid_word(word)
-        paths = self.model.valid_paths()
+        paths = (
+            self.model.valid_paths()
+            if closure == "trace"
+            else (self.model.plat_path(),)
+        )
         sampler_name = None
         shots_per_circuit = None
 
@@ -282,11 +301,20 @@ class AJLJonesEvaluator:
         amplitudes = {
             estimate.path: estimate.amplitude for estimate in path_estimates
         }
-        markov_trace = self.model.markov_trace(amplitudes)
-        value = self.model.trace_closure_jones(braid_word, amplitudes)
+        if closure == "trace":
+            markov_trace = self.model.markov_trace(amplitudes)
+            value = self.model.trace_closure_jones(braid_word, amplitudes)
+        else:
+            markov_trace = None
+            value = self.model.plat_closure_jones(
+                path_estimates[0].amplitude,
+                writhe=normalized_plat_writhe,
+            )
         real_error, imag_error = self._propagate_standard_errors(
             braid_word,
             path_estimates,
+            closure,
+            normalized_plat_writhe,
         )
         total_shots = sum(
             estimate.real.shots + estimate.imag.shots
@@ -295,6 +323,8 @@ class AJLJonesEvaluator:
         return JonesEvaluation(
             model=self.model,
             word=braid_word,
+            closure=closure,
+            plat_writhe=normalized_plat_writhe,
             method=method,
             circuit_level=circuit_level,
             config=self.config,
@@ -313,30 +343,63 @@ class AJLJonesEvaluator:
         self,
         word: BraidWord,
         estimates: tuple[PathAmplitudeEstimate, ...],
+        closure: ClosureType,
+        plat_writhe: int | None,
     ) -> tuple[float, float]:
-        total_weight = math.fsum(estimate.endpoint_weight for estimate in estimates)
-        trace_real_variance = math.fsum(
-            (estimate.endpoint_weight / total_weight) ** 2
-            * estimate.real.standard_error**2
-            for estimate in estimates
-        )
-        trace_imag_variance = math.fsum(
-            (estimate.endpoint_weight / total_weight) ** 2
-            * estimate.imag.standard_error**2
-            for estimate in estimates
-        )
+        if closure == "trace":
+            total_weight = math.fsum(
+                estimate.endpoint_weight for estimate in estimates
+            )
+            raw_real_variance = math.fsum(
+                (estimate.endpoint_weight / total_weight) ** 2
+                * estimate.real.standard_error**2
+                for estimate in estimates
+            )
+            raw_imag_variance = math.fsum(
+                (estimate.endpoint_weight / total_weight) ** 2
+                * estimate.imag.standard_error**2
+                for estimate in estimates
+            )
+            closure_factor = (-(self.model.A**3)) ** word.writhe
+            closure_factor *= self.model.d ** (self.model.strands - 1)
+        else:
+            estimate = estimates[0]
+            raw_real_variance = estimate.real.standard_error**2
+            raw_imag_variance = estimate.imag.standard_error**2
+            closure_factor = self.model.plat_closure_jones(
+                1.0,
+                writhe=plat_writhe,
+            )
 
-        closure_factor = (-(self.model.A**3)) ** word.writhe
-        closure_factor *= self.model.d ** (self.model.strands - 1)
         real_variance = (
-            closure_factor.real**2 * trace_real_variance
-            + closure_factor.imag**2 * trace_imag_variance
+            closure_factor.real**2 * raw_real_variance
+            + closure_factor.imag**2 * raw_imag_variance
         )
         imag_variance = (
-            closure_factor.imag**2 * trace_real_variance
-            + closure_factor.real**2 * trace_imag_variance
+            closure_factor.imag**2 * raw_real_variance
+            + closure_factor.real**2 * raw_imag_variance
         )
         return math.sqrt(real_variance), math.sqrt(imag_variance)
+
+
+def _validate_closure_options(
+    closure: object,
+    plat_writhe: object,
+) -> int | None:
+    if closure not in {"trace", "plat"}:
+        raise ValueError("closure must be 'trace' or 'plat'")
+    if closure == "trace":
+        if plat_writhe is not None:
+            raise ValueError("plat_writhe can only be specified for plat closure")
+        return None
+    if plat_writhe is None:
+        raise ValueError("plat_writhe is required for plat closure")
+    if isinstance(plat_writhe, bool):
+        raise ValueError("plat_writhe must be an integer")
+    try:
+        return int(operator.index(plat_writhe))
+    except TypeError:
+        raise ValueError("plat_writhe must be an integer") from None
 
 
 def _positive_shots(value: object) -> int:
@@ -356,6 +419,8 @@ def evaluate_jones(
     *,
     strands: int,
     k: int = 5,
+    closure: ClosureType = "trace",
+    plat_writhe: int | None = None,
     method: EvaluationMethod = "statevector",
     circuit_level: EvaluationCircuitLevel = 3,
     shots: int | None = None,
@@ -363,7 +428,7 @@ def evaluate_jones(
     config: CompilerConfig | None = None,
     sampler: BaseSamplerV2 | None = None,
 ) -> JonesEvaluation:
-    """Numerically evaluate a trace-closure Jones value with compiled circuits."""
+    """Numerically evaluate a trace- or plat-closure Jones value."""
 
     evaluator = AJLJonesEvaluator(
         AJLPathModel(strands=strands, level=k),
@@ -371,6 +436,8 @@ def evaluate_jones(
     )
     return evaluator.evaluate(
         word,
+        closure=closure,
+        plat_writhe=plat_writhe,
         method=method,
         circuit_level=circuit_level,
         shots=shots,

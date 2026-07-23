@@ -86,6 +86,28 @@ def test_valid_paths_are_boundary_pruned_and_deterministic(
     assert all(model.is_valid_path(path) for path in expected)
 
 
+def test_plat_path_is_alternating_and_requires_even_strands() -> None:
+    model = AJLPathModel(6, 5)
+    assert model.plat_path() == (1, 0, 1, 0, 1, 0)
+    assert model.coerce_path(model.plat_path()) == model.plat_path()
+
+    with pytest.raises(ValueError, match="even number of strands"):
+        AJLPathModel(3, 5).plat_path()
+
+
+def test_plat_closure_normalization_uses_oriented_writhe() -> None:
+    model = AJLPathModel(4, 5)
+    amplitude = 0.25 - 0.5j
+    writhe = -2
+    expected = (-(model.A**3)) ** writhe * model.d * amplitude
+
+    assert model.plat_closure_jones(amplitude, writhe=writhe) == pytest.approx(
+        expected
+    )
+    with pytest.raises(ValueError, match="writhe must be an integer"):
+        model.plat_closure_jones(amplitude, writhe=1.5)
+
+
 def test_endpoint_vertices_and_weights_preserve_path_order() -> None:
     model = AJLPathModel(2, 5)
     paths = model.valid_paths()

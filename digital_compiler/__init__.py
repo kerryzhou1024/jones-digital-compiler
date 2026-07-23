@@ -9,6 +9,7 @@ from .compiler import (
 from .evaluation import (
     DEFAULT_SHOTS,
     AJLJonesEvaluator,
+    ClosureType,
     EvaluationCircuitLevel,
     EvaluationMethod,
     HadamardComponentEstimate,
@@ -76,6 +77,7 @@ __all__ = [
     "BraidGenerator",
     "BraidWord",
     "CleanAncillaMCX",
+    "ClosureType",
     "CommutingLayerScheduling",
     "CompilerConfig",
     "DenseAJLReference",

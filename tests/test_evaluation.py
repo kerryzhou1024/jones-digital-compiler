@@ -42,6 +42,10 @@ def test_exact_hopf_evaluation_matches_analytic_value(circuit_level: int) -> Non
 
     assert abs(result.value - expected) < TOL
     assert result.method == "statevector"
+    assert result.closure == "trace"
+    assert result.plat_writhe is None
+    assert result.markov_trace is not None
+    assert result.plat_amplitude is None
     assert result.circuit_level == circuit_level
     assert result.circuit_count == 4
     assert result.shots_per_circuit is None
@@ -77,6 +81,43 @@ def test_identity_braid_evaluates_the_unlink() -> None:
         abs(estimate.amplitude - 1.0) < TOL
         for estimate in result.path_estimates
     )
+
+
+@pytest.mark.parametrize("circuit_level", [2, 3])
+def test_exact_four_strand_plat_uses_only_the_alternating_path(
+    circuit_level: int,
+) -> None:
+    result = evaluate_jones(
+        BraidWord.identity(),
+        strands=4,
+        k=5,
+        closure="plat",
+        plat_writhe=0,
+        circuit_level=circuit_level,
+    )
+
+    assert result.value == pytest.approx(result.model.d)
+    assert result.closure == "plat"
+    assert result.plat_writhe == 0
+    assert result.markov_trace is None
+    assert result.plat_amplitude == pytest.approx(1.0)
+    assert tuple(result.path_amplitudes) == (result.model.plat_path(),)
+    assert result.circuit_count == 2
+    assert result.total_shots == 0
+
+
+def test_plat_uses_oriented_closure_writhe_not_braid_exponent_sum() -> None:
+    result = evaluate_jones(
+        "s1",
+        strands=2,
+        closure="plat",
+        plat_writhe=-1,
+        circuit_level=2,
+    )
+
+    assert result.word.writhe == 1
+    assert result.plat_writhe == -1
+    assert result.value == pytest.approx(1.0, abs=TOL)
 
 
 def test_seeded_shot_evaluation_is_reproducible_and_reports_cost() -> None:
@@ -163,6 +204,53 @@ def test_custom_sampler_receives_one_batched_job() -> None:
     assert result.total_shots == 512
 
 
+def test_sampled_plat_is_reproducible_and_propagates_its_normalization() -> None:
+    kwargs = {
+        "strands": 2,
+        "closure": "plat",
+        "plat_writhe": -1,
+        "method": "shots",
+        "circuit_level": 2,
+        "shots": 2048,
+        "seed": 41,
+    }
+    first = evaluate_jones("s1", **kwargs)
+    second = evaluate_jones("s1", **kwargs)
+    estimate = first.path_estimates[0]
+    factor = first.model.plat_closure_jones(1.0, writhe=-1)
+    expected_real_error = math.sqrt(
+        factor.real**2 * estimate.real.standard_error**2
+        + factor.imag**2 * estimate.imag.standard_error**2
+    )
+    expected_imag_error = math.sqrt(
+        factor.imag**2 * estimate.real.standard_error**2
+        + factor.real**2 * estimate.imag.standard_error**2
+    )
+
+    assert first.path_estimates == second.path_estimates
+    assert first.circuit_count == 2
+    assert first.total_shots == 4096
+    assert first.real_standard_error == pytest.approx(expected_real_error)
+    assert first.imag_standard_error == pytest.approx(expected_imag_error)
+
+
+def test_custom_sampler_batches_only_two_plat_circuits() -> None:
+    sampler = RecordingSampler()
+    result = evaluate_jones(
+        "s1",
+        strands=2,
+        closure="plat",
+        plat_writhe=-1,
+        method="shots",
+        circuit_level=2,
+        shots=128,
+        sampler=sampler,
+    )
+
+    assert sampler.calls == [(2, 128)]
+    assert result.total_shots == 256
+
+
 def test_shot_mode_uses_documented_default() -> None:
     result = evaluate_jones(
         BraidWord.identity(),
@@ -180,6 +268,17 @@ def test_shot_mode_uses_documented_default() -> None:
     [
         ({"method": "invalid"}, "method must be"),
         ({"circuit_level": 1}, "circuit_level must be"),
+        ({"closure": "invalid"}, "closure must be"),
+        ({"closure": "plat"}, "plat_writhe is required"),
+        ({"plat_writhe": 0}, "plat_writhe can only"),
+        (
+            {"closure": "plat", "plat_writhe": 1.5},
+            "plat_writhe must be an integer",
+        ),
+        (
+            {"closure": "plat", "plat_writhe": True},
+            "plat_writhe must be an integer",
+        ),
         ({"method": "shots", "shots": 0}, "shots must be"),
         ({"method": "shots", "shots": 1.5}, "shots must be"),
         ({"shots": 10}, "shots can only"),
@@ -203,3 +302,13 @@ def test_invalid_evaluation_options_are_rejected(kwargs, message: str) -> None:
 def test_declared_strands_must_support_the_braid_word() -> None:
     with pytest.raises(ValueError, match="needs 4 strands"):
         evaluate_jones("s3", strands=3)
+
+
+def test_plat_closure_rejects_odd_strand_counts() -> None:
+    with pytest.raises(ValueError, match="even number of strands"):
+        evaluate_jones(
+            "s1^2",
+            strands=3,
+            closure="plat",
+            plat_writhe=0,
+        )
