@@ -99,7 +99,12 @@ def test_plat_problem_can_compile_any_model_valid_path() -> None:
         strands=4,
     )
 
-    circuit = problem.circuit("1100", "imag", circuit_level=1)
+    circuit = problem.circuit(
+        "1100",
+        "imag",
+        circuit_level=1,
+        measure=False,
+    )
 
     assert circuit.metadata["compiler_level"] == 1
     assert circuit.name.endswith("_imag")
@@ -146,6 +151,7 @@ def test_problem_circuit_matches_the_low_level_compiler(
         "10",
         part,
         circuit_level=circuit_level,
+        measure=False,
     )
 
     assert isinstance(observed, CompiledCircuit)

@@ -64,7 +64,10 @@ from .primitives import (
 from .problem import CircuitLevelSelection, CompiledCircuit, JonesProblem
 from .reference import DenseAJLReference
 from .reporting import (
+    CircuitComparison,
+    CircuitInfo,
     circuit_gate_count_depth,
+    compare_circuits,
     compilation_summary,
     level_1_varphi_names,
     level_2_gate_family_counts,
@@ -82,6 +85,8 @@ __all__ = [
     "ClosureType",
     "CommutingLayerScheduling",
     "CircuitLevelSelection",
+    "CircuitComparison",
+    "CircuitInfo",
     "CompiledCircuit",
     "CompilerConfig",
     "CompilerLevel",
@@ -126,6 +131,7 @@ __all__ = [
     "clean_complex",
     "coerce_braid_word",
     "compilation_summary",
+    "compare_circuits",
     "controlled_varphi_gate",
     "evaluate_jones",
     "gray_code_rotation_angles",

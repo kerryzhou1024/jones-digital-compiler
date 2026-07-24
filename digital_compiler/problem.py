@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from qiskit import QuantumCircuit
 from qiskit.primitives import BaseSamplerV2
@@ -29,7 +29,19 @@ from .model import AJLPathModel, BraidWord, HadamardPart
 from .policies import CompilerConfig
 from .reference import DenseAJLReference
 
+if TYPE_CHECKING:
+    from .reporting import CircuitInfo
+
 CircuitLevelSelection = CompilerLevel | Literal["all"]
+
+
+@dataclass(frozen=True)
+class _CircuitProvenance:
+    word: BraidWord
+    closure: ClosureType
+    strands: int
+    k: int
+    config: CompilerConfig
 
 
 @dataclass(frozen=True)
@@ -41,6 +53,11 @@ class CompiledCircuit:
     circuit_level: CompilerLevel
     measured: bool
     circuit: QuantumCircuit = field(repr=False, compare=False)
+    _provenance: _CircuitProvenance | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def path_label(self) -> str:
@@ -82,6 +99,13 @@ class CompiledCircuit:
             active_title,
             max_lines=max_lines,
         )
+
+    def info(self) -> CircuitInfo:
+        """Return a fresh immutable provenance and logical-resource report."""
+
+        from .reporting import circuit_info
+
+        return circuit_info(self)
 
 
 @dataclass(frozen=True, init=False)
@@ -152,6 +176,15 @@ class JonesProblem:
     def _compiler(self) -> AJLCompiler:
         return self._evaluator.compiler
 
+    def _circuit_provenance(self) -> _CircuitProvenance:
+        return _CircuitProvenance(
+            word=self.word,
+            closure=self.closure,
+            strands=self.strands,
+            k=self.k,
+            config=self.config,
+        )
+
     def compile(
         self,
         path: str | Sequence[int],
@@ -174,7 +207,7 @@ class JonesProblem:
         part: HadamardPart = "real",
         *,
         circuit_level: CompilerLevel = 3,
-        measure: bool = False,
+        measure: bool = True,
     ) -> CompiledCircuit:
         """Compile one component, defaulting to the first valid path."""
 
@@ -197,6 +230,7 @@ class JonesProblem:
             circuit_level=circuit_level,
             measured=measure,
             circuit=circuit,
+            _provenance=self._circuit_provenance(),
         )
 
     def circuits(
@@ -234,6 +268,7 @@ class JonesProblem:
                         circuit_level=level,
                         measured=measure,
                         circuit=circuit,
+                        _provenance=self._circuit_provenance(),
                     )
             return
 

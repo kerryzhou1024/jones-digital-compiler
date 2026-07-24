@@ -36,7 +36,7 @@ pytest
 ## Basic Usage
 
 ```python
-from digital_compiler import JonesProblem
+from digital_compiler import JonesProblem, compare_circuits
 
 problem = JonesProblem(
     "s1^2",
@@ -46,10 +46,14 @@ problem = JonesProblem(
 )
 
 exact = problem.evaluate()
-real_level_3 = problem.circuit(part="real", circuit_level=3)
+real_level_3 = problem.circuit(part="real", circuit_level=3, measure=True)
 all_levels = problem.compile("10", "real")
 
 real_level_3.display(title="Hopf real — Level 3", max_lines=12)
+real_level_3.info()  # rich table in a notebook
+
+print(real_level_3.info())          # deterministic terminal table
+resources = real_level_3.info().as_dict()
 ```
 
 The façade exposes all valid AJL paths and the subset required by its closure:
@@ -71,6 +75,11 @@ Qiskit circuit drawings, display themselves in notebooks with `.display()`,
 forward common circuit attributes, and expose the raw Qiskit object as
 `.circuit`.
 
+`CompiledCircuit.info()` describes that one compiler-level logical circuit.
+It selects the gate-family vocabulary from the recorded compiler level,
+separates measurements from quantum gate totals, and retains exact Qiskit
+operation counts and depths in `exact_gate_stats` and `as_dict()`.
+
 When `path` is omitted from a singular `circuit()` call, the façade uses
 `problem.valid_paths[0]`. Omitting `path` from plural `circuits()` still selects
 the complete closure workload.
@@ -91,6 +100,35 @@ show_problem_circuits(
 
 `AJLPathModel`, `AJLCompiler`, and `AJLJonesEvaluator` remain available as the
 advanced reusable engines underneath this API.
+
+Compare compatible or intentionally different circuits without inventing a
+normalized cost model:
+
+```python
+trace_circuit = problem.circuit("10", "real", circuit_level=3)
+plat_problem = JonesProblem(
+    "s2^2",
+    closure="plat",
+    strands=4,
+    k=5,
+    writhe=2,
+)
+plat_circuit = plat_problem.circuit("1010", "real", circuit_level=3)
+
+comparison = compare_circuits(
+    {
+        "Trace |10>": trace_circuit,
+        "Plat |1010>": plat_circuit,
+    }
+)
+comparison              # rich side-by-side notebook table
+print(comparison)        # deterministic terminal table
+comparison.as_dict()    # structured research data
+```
+
+These are pre-transpilation, single-circuit logical resources. They are not
+physical-qubit, surface-code, or total closure-workload estimates. Level 3
+still contains arbitrary rotations and is not a final Clifford+T cost.
 
 ## Trace and Plat Evaluation
 
