@@ -247,15 +247,15 @@ def test_clean_ancilla_policy_remains_available_as_an_opt_in() -> None:
     compiler = AJLCompiler(AJLPathModel(2, 5), config)
     compilation = compiler.compile_hadamard_test("s1^2", "10")
 
-    assert compiler.work_qubits == 1
-    assert compiler.logical_qubits == 7
+    assert compiler.work_qubits == 0
+    assert compiler.logical_qubits == 6
     assert register_signature(compilation.level_1_varphi)[0][-1] == (
         "adder_work",
-        1,
+        0,
     )
     metadata = compilation.level_3_single_control.metadata
     assert metadata["lowering_policies"]["mcx"] == "clean_ancilla_toffoli_ladder"
-    assert metadata["compiler_config"]["workspace_qubits"] == 1
+    assert metadata["compiler_config"]["workspace_qubits"] == 0
 
 
 def test_default_no_ancilla_policy_reduces_t_count_for_k9() -> None:

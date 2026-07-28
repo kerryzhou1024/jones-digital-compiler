@@ -103,8 +103,18 @@ def test_parallel_route_uses_the_minimum_cost_lane_assignment() -> None:
     circuit = compiler.level_2_braid_circuit(word)
     assert circuit.metadata["prefix_height_strategy"] == "rolling"
     assert circuit.metadata["prefix_height_path_steps"] == 396
-    assert sum(circuit.count_ops().values()) == 5667
-    assert circuit.depth() == 1671
+    assert sum(circuit.count_ops().values()) == 4083
+    assert circuit.depth() == 1267
+
+
+def test_serial_signed_path_step_adder_resource_regression() -> None:
+    circuit = AJLCompiler(AJLPathModel(102, 5)).level_2_braid_circuit(
+        "100 99 101"
+    )
+
+    assert sum(circuit.count_ops().values()) == 2131
+    assert circuit.depth() == 1309
+    assert circuit.count_ops().get("mcx", 0) == 0
 
 
 def test_rolling_route_cleans_lanes_when_parallel_width_shrinks() -> None:

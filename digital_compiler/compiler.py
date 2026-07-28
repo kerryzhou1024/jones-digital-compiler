@@ -112,8 +112,9 @@ class AJLCompiler:
             self.config.scheduling.lane_capacity(self.strands)
         )
         self.height_register_qubits = self.height_qubits * self.parallel_lanes
+        max_adder_controls = self.height_qubits - 1
         self.work_qubits_per_lane = int(
-            self.config.level3.mcx.clean_ancillas(self.height_qubits)
+            self.config.level3.mcx.clean_ancillas(max_adder_controls)
         )
         if self.work_qubits_per_lane < 0:
             raise ValueError("an MCX policy cannot request negative workspace")

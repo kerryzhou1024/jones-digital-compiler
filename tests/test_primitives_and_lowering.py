@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pytest
 from qiskit import QuantumCircuit, QuantumRegister
+from qiskit.circuit import ControlledGate
 from qiskit.circuit.library import MCPhaseGate, MCXGate, RXGate, RYGate, RZGate, UCRYGate
 from qiskit.quantum_info import Operator, Statevector
 
@@ -13,6 +14,7 @@ from digital_compiler import (
     GrayCodeMCR,
     Level3Policy,
     NoAncillaMCX,
+    QuantumAdder,
     RecursiveMCPhase,
     append_standard_toffoli,
     append_uniformly_controlled_ry,
@@ -50,6 +52,70 @@ def test_standard_toffoli_inventory_and_unitary() -> None:
     oracle.ccx(0, 1, 2)
     assert unitary_error(custom, oracle) < 1e-10
     assert dict(custom.count_ops()) == {"h": 2, "cx": 6, "t": 4, "tdg": 3}
+
+
+@pytest.mark.parametrize(
+    "method_name,direction",
+    [("add_path_step", 1), ("subtract_path_step", -1)],
+)
+@pytest.mark.parametrize("width", range(1, 6))
+def test_path_step_adder_matches_signed_modular_arithmetic(
+    width: int,
+    method_name: str,
+    direction: int,
+) -> None:
+    circuit = QuantumCircuit(width + 1)
+    getattr(QuantumAdder(width), method_name)(
+        circuit,
+        0,
+        range(1, width + 1),
+    )
+
+    modulus = 1 << width
+    for basis in range(1 << (width + 1)):
+        path_bit = basis & 1
+        height = basis >> 1
+        signed_step = 2 * path_bit - 1
+        expected_height = (height + direction * signed_step) % modulus
+        expected_basis = path_bit | (expected_height << 1)
+
+        actual = Statevector.from_int(basis, 1 << (width + 1)).evolve(circuit)
+        expected = Statevector.from_int(expected_basis, 1 << (width + 1))
+        np.testing.assert_allclose(actual.data, expected.data, atol=1e-9)
+
+
+@pytest.mark.parametrize("width", range(1, 6))
+def test_path_step_add_and_subtract_are_exact_inverses(width: int) -> None:
+    circuit = QuantumCircuit(width + 1)
+    adder = QuantumAdder(width)
+    adder.add_path_step(circuit, 0, range(1, width + 1))
+    adder.subtract_path_step(circuit, 0, range(1, width + 1))
+
+    assert unitary_error(circuit, QuantumCircuit(width + 1)) < 1e-10
+
+
+@pytest.mark.parametrize("method_name", ["add_path_step", "subtract_path_step"])
+@pytest.mark.parametrize("width", range(1, 6))
+def test_path_step_adder_uses_at_most_width_minus_one_controls(
+    width: int,
+    method_name: str,
+) -> None:
+    circuit = QuantumCircuit(width + 1)
+    getattr(QuantumAdder(width), method_name)(
+        circuit,
+        0,
+        range(1, width + 1),
+    )
+
+    x_control_counts = [
+        instruction.operation.num_ctrl_qubits
+        for instruction in circuit.data
+        if isinstance(instruction.operation, ControlledGate)
+        and instruction.operation.base_gate.name == "x"
+    ]
+    assert max(x_control_counts, default=0) == width - 1
+    if width == 1:
+        assert dict(circuit.count_ops()) == {"x": 1}
 
 
 @pytest.mark.parametrize("axis,gate", [("x", RXGate), ("y", RYGate), ("z", RZGate)])

@@ -232,16 +232,30 @@ class QuantumAdder:
             circuit.x(qubit)
 
     def add_path_step(self, circuit, bit, register) -> None:
-        circuit.x(bit)
-        self.decrement(circuit, register, control=bit)
-        circuit.x(bit)
-        self.increment(circuit, register, control=bit)
+        register = list(register)
+        if self.width == 1:
+            circuit.x(register[0])
+            return
+
+        self.decrement(circuit, register)
+        QuantumAdder(self.width - 1).increment(
+            circuit,
+            register[1:],
+            control=bit,
+        )
 
     def subtract_path_step(self, circuit, bit, register) -> None:
-        self.decrement(circuit, register, control=bit)
-        circuit.x(bit)
-        self.increment(circuit, register, control=bit)
-        circuit.x(bit)
+        register = list(register)
+        if self.width == 1:
+            circuit.x(register[0])
+            return
+
+        self.increment(circuit, register)
+        QuantumAdder(self.width - 1).decrement(
+            circuit,
+            register[1:],
+            control=bit,
+        )
 
 
 def prepare_basis_path(circuit: QuantumCircuit, path_register, path_bits: Sequence[int]) -> None:

@@ -374,7 +374,7 @@ def test_parallel_hadamard_test_matches_dense_and_cleans_scratch(
 
 def test_parallel_clean_ancilla_workspace_is_partitioned_by_lane() -> None:
     compiler = AJLCompiler(
-        AJLPathModel(5, 5),
+        AJLPathModel(5, 9),
         parallel_config(mcx=CleanAncillaMCX(), max_lanes=2),
     )
     level_3 = compiler.level_3_braid_circuit("2 4")

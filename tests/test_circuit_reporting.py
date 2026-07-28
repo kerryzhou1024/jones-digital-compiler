@@ -73,10 +73,10 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         plat.quantum_gate_count,
         plat.quantum_gate_depth,
         plat.measurement_count,
-    ) == ("plat", "1010", 3, 8, 322, 247, 1)
-    assert plat.gate_families["CNOT"] == 134
+    ) == ("plat", "1010", 3, 8, 206, 150, 1)
+    assert plat.gate_families["CNOT"] == 86
     assert plat.gate_families["T/Tdg"] == 42
-    assert plat.exact_gate_stats["rz"] == {"count": 64, "depth": 59}
+    assert plat.exact_gate_stats["rz"] == {"count": 12, "depth": 10}
 
     for report in (trace, plat):
         assert sum(report.gate_families.values()) == report.quantum_gate_count
