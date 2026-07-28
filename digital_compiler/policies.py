@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import operator
 from dataclasses import dataclass, field
+from heapq import heapify, heappop, heappush
 from typing import Protocol
 
 from qiskit import QuantumCircuit
@@ -58,7 +59,7 @@ class SerialGeneratorScheduling:
 
 @dataclass(frozen=True)
 class CommutingLayerScheduling:
-    """ASAP scheduling of pairwise-distant braid generators."""
+    """Critical-path scheduling of pairwise-distant braid generators."""
 
     max_lanes: int | None = None
     name: str = "commuting_layers"
@@ -84,34 +85,198 @@ class CommutingLayerScheduling:
 
     def schedule(self, word: BraidWord, strands: int) -> GeneratorSchedule:
         capacity = self.lane_capacity(strands)
-        layers: list[list[int]] = []
-        last_layer_by_index: dict[int, int] = {}
-
+        predecessors: list[set[int]] = [set() for _ in word.generators]
+        successors: list[set[int]] = [set() for _ in word.generators]
+        last_position_by_index: dict[int, int] = {}
         for position, generator in enumerate(word.generators):
-            predecessors = [
-                last_layer_by_index[index]
-                for index in (
-                    generator.index - 1,
-                    generator.index,
-                    generator.index + 1,
+            for index in (
+                generator.index - 1,
+                generator.index,
+                generator.index + 1,
+            ):
+                predecessor = last_position_by_index.get(index)
+                if predecessor is None:
+                    continue
+                predecessors[position].add(predecessor)
+                successors[predecessor].add(position)
+            last_position_by_index[generator.index] = position
+
+        remaining_depth = [1] * word.crossings
+        for position in reversed(range(word.crossings)):
+            if successors[position]:
+                remaining_depth[position] = 1 + max(
+                    remaining_depth[successor] for successor in successors[position]
                 )
-                if index in last_layer_by_index
-            ]
-            layer_index = 0 if not predecessors else 1 + max(predecessors)
-            while True:
-                while len(layers) <= layer_index:
-                    layers.append([])
-                if len(layers[layer_index]) < capacity:
-                    break
-                layer_index += 1
 
-            layers[layer_index].append(position)
-            last_layer_by_index[generator.index] = layer_index
+        remaining_predecessors = [
+            len(position_predecessors) for position_predecessors in predecessors
+        ]
+        ready = [
+            (-remaining_depth[position], position)
+            for position, count in enumerate(remaining_predecessors)
+            if count == 0
+        ]
+        heapify(ready)
+        layers: list[tuple[int, ...]] = []
+        scheduled = 0
 
-        return tuple(tuple(layer) for layer in layers)
+        while ready:
+            selected = [heappop(ready)[1] for _ in range(min(capacity, len(ready)))]
+            layers.append(tuple(sorted(selected)))
+            scheduled += len(selected)
+
+            for position in selected:
+                for successor in successors[position]:
+                    remaining_predecessors[successor] -= 1
+                    if remaining_predecessors[successor] == 0:
+                        heappush(
+                            ready,
+                            (-remaining_depth[successor], successor),
+                        )
+
+        if scheduled != word.crossings:
+            raise AssertionError("generator dependency graph must be acyclic")
+        return tuple(layers)
 
     def metadata(self) -> dict[str, object]:
         return {"name": self.name, "max_lanes": self.max_lanes}
+
+
+class ControlDistributionPolicy(Protocol):
+    """Strategy for distributing one coherent experiment control across lanes."""
+
+    name: str
+
+    def control_ancillas(self, lane_capacity: int) -> int: ...
+
+    def prepare(
+        self,
+        circuit: QuantumCircuit,
+        control,
+        ancillas,
+        active_width: int,
+    ) -> tuple: ...
+
+    def unprepare(
+        self,
+        circuit: QuantumCircuit,
+        control,
+        ancillas,
+        active_width: int,
+    ) -> None: ...
+
+    def metadata(self) -> dict[str, object]: ...
+
+
+@dataclass(frozen=True)
+class SharedControl:
+    """Reuse one experiment control across lanes without clean ancillas."""
+
+    name: str = "shared"
+
+    @staticmethod
+    def control_ancillas(lane_capacity: int) -> int:
+        del lane_capacity
+        return 0
+
+    @staticmethod
+    def prepare(
+        circuit: QuantumCircuit,
+        control,
+        ancillas,
+        active_width: int,
+    ) -> tuple:
+        del circuit
+        if ancillas:
+            raise ValueError("shared control distribution does not use ancillas")
+        if active_width < 0:
+            raise ValueError("active control width cannot be negative")
+        return (control,) * active_width
+
+    @staticmethod
+    def unprepare(
+        circuit: QuantumCircuit,
+        control,
+        ancillas,
+        active_width: int,
+    ) -> None:
+        del circuit, control, active_width
+        if ancillas:
+            raise ValueError("shared control distribution does not use ancillas")
+
+    def metadata(self) -> dict[str, object]:
+        return {"name": self.name}
+
+
+@dataclass(frozen=True)
+class TreeControlFanout:
+    """Distribute a coherent control with a logarithmic-depth CNOT tree."""
+
+    name: str = "tree_fanout"
+
+    @staticmethod
+    def control_ancillas(lane_capacity: int) -> int:
+        if lane_capacity < 1:
+            raise ValueError("lane capacity must be positive")
+        return lane_capacity - 1
+
+    @staticmethod
+    def _rounds(control, ancillas, active_width: int):
+        ancillas = list(ancillas)
+        if active_width < 0:
+            raise ValueError("active control width cannot be negative")
+        if active_width > 1 + len(ancillas):
+            raise ValueError("active control width exceeds fanout capacity")
+        if active_width == 0:
+            return (), ()
+
+        lane_controls = (control, *ancillas[: active_width - 1])
+        rounds = []
+        copied = 1
+        while copied < len(lane_controls):
+            new_count = min(copied, len(lane_controls) - copied)
+            rounds.append(
+                tuple(
+                    (lane_controls[offset], lane_controls[copied + offset])
+                    for offset in range(new_count)
+                )
+            )
+            copied += new_count
+        return lane_controls, tuple(rounds)
+
+    @classmethod
+    def prepare(
+        cls,
+        circuit: QuantumCircuit,
+        control,
+        ancillas,
+        active_width: int,
+    ) -> tuple:
+        lane_controls, rounds = cls._rounds(
+            control,
+            ancillas,
+            active_width,
+        )
+        for pairs in rounds:
+            for source, target in pairs:
+                circuit.cx(source, target)
+        return lane_controls
+
+    @classmethod
+    def unprepare(
+        cls,
+        circuit: QuantumCircuit,
+        control,
+        ancillas,
+        active_width: int,
+    ) -> None:
+        _, rounds = cls._rounds(control, ancillas, active_width)
+        for pairs in reversed(rounds):
+            for source, target in pairs:
+                circuit.cx(source, target)
+
+    def metadata(self) -> dict[str, object]:
+        return {"name": self.name}
 
 
 class HeightSynthesisPolicy(Protocol):
@@ -456,10 +621,14 @@ class CompilerConfig:
     scheduling: GeneratorSchedulingPolicy = field(
         default_factory=SerialGeneratorScheduling
     )
+    control_distribution: ControlDistributionPolicy = field(
+        default_factory=SharedControl
+    )
 
     def metadata(self) -> dict[str, object]:
         return {
             "height_synthesis": self.height.name,
             "level_3": self.level3.metadata(),
             "generator_scheduling": self.scheduling.metadata(),
+            "control_distribution": self.control_distribution.metadata(),
         }

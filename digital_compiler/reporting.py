@@ -464,6 +464,7 @@ def _compiler_policy_summary(
     return {
         "height_strategy": metadata.get("height_strategy"),
         "generator_scheduling": metadata.get("generator_scheduling"),
+        "control_distribution": metadata.get("control_distribution"),
         "generator_layers": metadata.get("generator_layers"),
         "parallel_lanes": metadata.get("parallel_lanes"),
         "active_parallel_width": metadata.get("active_parallel_width"),
@@ -621,6 +622,7 @@ def compilation_summary(compilation: HadamardTestCompilation) -> dict[str, objec
         "part": compilation.part,
         "height_strategy": compilation.height_policy_label,
         "generator_scheduling": compilation.scheduling_policy_label,
+        "control_distribution": compilation.control_distribution_policy_label,
         "generator_layers": level_2_metadata.get("generator_layers"),
         "parallel_lanes": level_2_metadata.get("parallel_lanes"),
         "active_parallel_width": level_2_metadata.get("active_parallel_width"),

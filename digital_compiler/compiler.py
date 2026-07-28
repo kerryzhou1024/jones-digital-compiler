@@ -79,6 +79,10 @@ class HadamardTestCompilation:
     def scheduling_policy_label(self) -> str:
         return self.config.scheduling.name
 
+    @property
+    def control_distribution_policy_label(self) -> str:
+        return self.config.control_distribution.name
+
 
 class AJLCompiler:
     """Compile AJL braid words through explicit semantic and lowering layers."""
@@ -105,7 +109,25 @@ class AJLCompiler:
         if self.work_qubits_per_lane < 0:
             raise ValueError("an MCX policy cannot request negative workspace")
         self.work_qubits = self.work_qubits_per_lane * self.parallel_lanes
-        self.control_fanout_qubits = self.parallel_lanes - 1
+        raw_control_ancillas = self.config.control_distribution.control_ancillas(
+            self.parallel_lanes
+        )
+        if isinstance(raw_control_ancillas, bool):
+            raise ValueError(
+                "a control distribution policy must request a nonnegative "
+                "integer number of ancillas"
+            )
+        try:
+            self.control_fanout_qubits = int(operator.index(raw_control_ancillas))
+        except TypeError:
+            raise ValueError(
+                "a control distribution policy must request a nonnegative "
+                "integer number of ancillas"
+            ) from None
+        if self.control_fanout_qubits < 0:
+            raise ValueError(
+                "a control distribution policy cannot request negative ancillas"
+            )
         self.lowerer = SingleControlLowerer(self.config.level3)
         (
             self.projector_basis_angles,
@@ -293,6 +315,7 @@ class AJLCompiler:
         )
         return {
             "generator_scheduling": self.config.scheduling.name,
+            "control_distribution": self.config.control_distribution.name,
             "generator_layers": signed_layers,
             "parallel_lanes": self.parallel_lanes,
             "active_parallel_width": max((len(layer) for layer in schedule), default=0),
@@ -304,29 +327,6 @@ class AJLCompiler:
         start = lane * self.height_selector_qubits
         stop = start + self.height_selector_qubits
         return list(height[start:stop])
-
-    @staticmethod
-    def _append_control_fanout(circuit, control, fanout, width: int):
-        lane_controls = [control, *list(fanout)[: max(0, width - 1)]]
-        rounds = []
-        copied = 1
-        while copied < len(lane_controls):
-            new_count = min(copied, len(lane_controls) - copied)
-            pairs = tuple(
-                (lane_controls[offset], lane_controls[copied + offset])
-                for offset in range(new_count)
-            )
-            for source, target in pairs:
-                circuit.cx(source, target)
-            rounds.append(pairs)
-            copied += new_count
-        return tuple(lane_controls), tuple(rounds)
-
-    @staticmethod
-    def _append_control_unfanout(circuit, rounds) -> None:
-        for pairs in reversed(rounds):
-            for source, target in pairs:
-                circuit.cx(source, target)
 
     def controlled_varphi_gate(
         self,
@@ -464,7 +464,7 @@ class AJLCompiler:
             **self._schedule_metadata(braid_word, schedule),
         }
         active_width = max((len(layer) for layer in schedule), default=0)
-        lane_controls, fanout_rounds = self._append_control_fanout(
+        lane_controls = self.config.control_distribution.prepare(
             circuit,
             control[0],
             control_fanout,
@@ -474,7 +474,12 @@ class AJLCompiler:
             self.append_logical_layer(
                 circuit, path, height, braid_word, layer, lane_controls
             )
-        self._append_control_unfanout(circuit, fanout_rounds)
+        self.config.control_distribution.unprepare(
+            circuit,
+            control[0],
+            control_fanout,
+            active_width,
+        )
         assert_level_2_contract(circuit)
         return circuit
 
@@ -572,7 +577,7 @@ class AJLCompiler:
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
         active_width = max((len(layer) for layer in schedule), default=0)
-        lane_controls, fanout_rounds = self._append_control_fanout(
+        lane_controls = self.config.control_distribution.prepare(
             circuit,
             control[0],
             control_fanout,
@@ -582,7 +587,12 @@ class AJLCompiler:
             self.append_logical_layer(
                 circuit, path, height, braid_word, layer, lane_controls
             )
-        self._append_control_unfanout(circuit, fanout_rounds)
+        self.config.control_distribution.unprepare(
+            circuit,
+            control[0],
+            control_fanout,
+            active_width,
+        )
         append_hadamard_readout(
             circuit,
             control[0],

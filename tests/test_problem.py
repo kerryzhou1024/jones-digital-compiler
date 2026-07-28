@@ -250,13 +250,14 @@ def test_problem_propagates_compiler_policy_to_circuits_and_results() -> None:
 
     assert problem.config is config
     assert circuit.metadata["generator_layers"] == ((1, 3),)
+    assert circuit.metadata["control_distribution"] == "shared"
     assert circuit.metadata["compiler_config"] == config.metadata() | {
         "workspace_qubits": 0,
         "workspace_qubits_per_lane": 0,
         "height_selector_qubits": 3,
         "height_register_qubits": 6,
         "parallel_lanes": 2,
-        "control_fanout_qubits": 1,
+        "control_fanout_qubits": 0,
     }
     assert result.config is config
 
@@ -292,8 +293,9 @@ def test_problem_shot_evaluation_is_reproducible() -> None:
     )
 
     assert first.value == second.value
-    assert first.path_estimates == second.path_estimates
-    assert first.total_shots == 4 * 256
+    assert first.trace_samples == second.trace_samples
+    assert first.path_estimates is None
+    assert first.total_shots == 2 * 256
 
 
 @pytest.mark.parametrize(

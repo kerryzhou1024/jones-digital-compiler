@@ -287,6 +287,7 @@ class JonesProblem:
         circuit_level: EvaluationCircuitLevel = 3,
         shots: int | None = None,
         seed: int | None = None,
+        path_seed: int | None = None,
         sampler: BaseSamplerV2 | None = None,
     ) -> JonesEvaluation:
         """Evaluate the Jones value at the AJL root selected by ``k``."""
@@ -299,6 +300,7 @@ class JonesProblem:
             circuit_level=circuit_level,
             shots=shots,
             seed=seed,
+            path_seed=path_seed,
             sampler=sampler,
         )
 

@@ -8,6 +8,7 @@ from .compiler import (
     register_signature,
 )
 from .evaluation import (
+    AJL_SUCCESS_PROBABILITY,
     DEFAULT_SHOTS,
     AJLJonesEvaluator,
     ClosureType,
@@ -16,6 +17,8 @@ from .evaluation import (
     HadamardComponentEstimate,
     JonesEvaluation,
     PathAmplitudeEstimate,
+    PathSampling,
+    TraceComponentSample,
     evaluate_jones,
 )
 from .lowering import assert_level_2_contract, assert_level_3_contract
@@ -32,6 +35,7 @@ from .policies import (
     CleanAncillaMCX,
     CommutingLayerScheduling,
     CompilerConfig,
+    ControlDistributionPolicy,
     GeneratorSchedule,
     GeneratorSchedulingPolicy,
     GrayCodeMCR,
@@ -44,7 +48,9 @@ from .policies import (
     NoAncillaMCX,
     RecursiveMCPhase,
     SerialGeneratorScheduling,
+    SharedControl,
     SwitchCaseHeightSynthesis,
+    TreeControlFanout,
 )
 from .primitives import (
     QuantumAdder,
@@ -79,6 +85,7 @@ __all__ = [
     "AJLCompiler",
     "AJLJonesEvaluator",
     "AJLPathModel",
+    "AJL_SUCCESS_PROBABILITY",
     "BraidGenerator",
     "BraidWord",
     "CleanAncillaMCX",
@@ -90,6 +97,7 @@ __all__ = [
     "CompiledCircuit",
     "CompilerConfig",
     "CompilerLevel",
+    "ControlDistributionPolicy",
     "DenseAJLReference",
     "EvaluationCircuitLevel",
     "EvaluationMethod",
@@ -111,10 +119,14 @@ __all__ = [
     "NoAncillaMCX",
     "QuantumAdder",
     "PathAmplitudeEstimate",
+    "PathSampling",
     "RecursiveMCPhase",
     "SerialGeneratorScheduling",
+    "SharedControl",
     "SwitchCaseHeightSynthesis",
     "TOL",
+    "TraceComponentSample",
+    "TreeControlFanout",
     "DEFAULT_SHOTS",
     "append_controlled_rotation",
     "append_fixed_height_braid",

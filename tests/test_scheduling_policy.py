@@ -19,7 +19,9 @@ from digital_compiler import (
     MultiplexedHeightSynthesis,
     NoAncillaMCX,
     SerialGeneratorScheduling,
+    SharedControl,
     SwitchCaseHeightSynthesis,
+    TreeControlFanout,
     compilation_summary,
     register_signature,
 )
@@ -53,11 +55,15 @@ def parallel_config(
     height=None,
     mcx=None,
     max_lanes: int | None = None,
+    control_distribution=None,
 ) -> CompilerConfig:
     return CompilerConfig(
         height=MultiplexedHeightSynthesis() if height is None else height,
         level3=Level3Policy(mcx=NoAncillaMCX() if mcx is None else mcx),
         scheduling=CommutingLayerScheduling(max_lanes=max_lanes),
+        control_distribution=(
+            SharedControl() if control_distribution is None else control_distribution
+        ),
     )
 
 
@@ -153,6 +159,39 @@ def test_serial_and_commuting_schedule_construction() -> None:
     assert layer_by_position[3] < layer_by_position[4]
 
 
+def test_critical_path_priority_avoids_a_greedy_extra_layer() -> None:
+    word = BraidWord.parse("1 3 5 4")
+    policy = CommutingLayerScheduling(max_lanes=2)
+
+    assert policy.schedule(word, strands=6) == ((1, 2), (0, 3))
+
+    model = AJLPathModel(6, 5)
+    critical = AJLCompiler(
+        model,
+        CompilerConfig(
+            scheduling=policy,
+            control_distribution=SharedControl(),
+        ),
+    ).compile_hadamard_test(word, "101010")
+    former_greedy = AJLCompiler(
+        model,
+        CompilerConfig(
+            scheduling=StaticScheduling(((0, 1), (2,), (3,)), capacity=2),
+            control_distribution=SharedControl(),
+        ),
+    ).compile_hadamard_test(word, "101010")
+
+    assert critical.level_2_multicontrolled.metadata["generator_layers"] == (
+        (3, 5),
+        (1, 4),
+    )
+    assert critical.logical_qubits == former_greedy.logical_qubits
+    assert (
+        critical.level_3_single_control.depth()
+        < former_greedy.level_3_single_control.depth()
+    )
+
+
 def test_parallel_lane_capacity_is_configurable_and_clamped() -> None:
     assert CommutingLayerScheduling().lane_capacity(6) == 3
     assert CommutingLayerScheduling(max_lanes=2).lane_capacity(6) == 2
@@ -219,11 +258,19 @@ def test_compiler_rejects_invalid_custom_lane_capacities() -> None:
 
 @pytest.mark.parametrize("word", ["1 3", "1 -3", "-1 3", "-1 -3"])
 @pytest.mark.parametrize("controlled", [False, True])
+@pytest.mark.parametrize(
+    "control_distribution",
+    [SharedControl(), TreeControlFanout()],
+)
 def test_parallel_mixed_sign_generators_match_dense_level_2(
     word: str,
     controlled: bool,
+    control_distribution,
 ) -> None:
-    compiler = AJLCompiler(AJLPathModel(4, 5), parallel_config())
+    compiler = AJLCompiler(
+        AJLPathModel(4, 5),
+        parallel_config(control_distribution=control_distribution),
+    )
     assert_braid_matches_dense(compiler, word, level=2, controlled=controlled)
 
 
@@ -252,23 +299,42 @@ def test_lane_caps_preserve_semantics(max_lanes: int | None) -> None:
     [MultiplexedHeightSynthesis(), SwitchCaseHeightSynthesis()],
 )
 @pytest.mark.parametrize("mcx_policy", [NoAncillaMCX(), CleanAncillaMCX()])
+@pytest.mark.parametrize(
+    "control_distribution",
+    [SharedControl(), TreeControlFanout()],
+)
 @pytest.mark.parametrize("controlled", [False, True])
 def test_parallel_level_3_matches_dense_across_synthesis_policies(
     height_policy,
     mcx_policy,
+    control_distribution,
     controlled: bool,
 ) -> None:
     compiler = AJLCompiler(
         AJLPathModel(4, 5),
-        parallel_config(height=height_policy, mcx=mcx_policy),
+        parallel_config(
+            height=height_policy,
+            mcx=mcx_policy,
+            control_distribution=control_distribution,
+        ),
     )
     assert_braid_matches_dense(compiler, "1 -3", level=3, controlled=controlled)
 
 
 @pytest.mark.parametrize("part", ["real", "imag"])
-def test_parallel_hadamard_test_matches_dense_and_cleans_scratch(part: str) -> None:
+@pytest.mark.parametrize(
+    "control_distribution",
+    [SharedControl(), TreeControlFanout()],
+)
+def test_parallel_hadamard_test_matches_dense_and_cleans_scratch(
+    part: str,
+    control_distribution,
+) -> None:
     model = AJLPathModel(4, 5)
-    compiler = AJLCompiler(model, parallel_config())
+    compiler = AJLCompiler(
+        model,
+        parallel_config(control_distribution=control_distribution),
+    )
     compilation = compiler.compile_hadamard_test("1 -3", "1010", part)
     amplitude = DenseAJLReference(model).path_amplitude("1 -3", "1010")
     expected = amplitude.real if part == "real" else amplitude.imag
@@ -333,17 +399,43 @@ def test_identity_and_two_strands_degenerate_cleanly() -> None:
     assert np.linalg.norm(state.data[1 << 5 :]) < TOL
 
 
+def test_shared_control_reuses_one_qubit_without_ancillas_or_gates() -> None:
+    policy = SharedControl()
+    circuit = QuantumCircuit(1)
+    controls = policy.prepare(
+        circuit,
+        circuit.qubits[0],
+        (),
+        active_width=3,
+    )
+    policy.unprepare(
+        circuit,
+        circuit.qubits[0],
+        (),
+        active_width=3,
+    )
+
+    assert controls == (circuit.qubits[0],) * 3
+    assert circuit.data == []
+
+
 def test_control_fanout_uses_a_logarithmic_depth_tree_and_uncomputes() -> None:
+    policy = TreeControlFanout()
     circuit = QuantumCircuit(4)
-    controls, rounds = AJLCompiler._append_control_fanout(
+    controls = policy.prepare(
         circuit,
         circuit.qubits[0],
         circuit.qubits[1:],
-        width=4,
+        active_width=4,
     )
     assert len(controls) == 4
     assert circuit.depth() == 2
-    AJLCompiler._append_control_unfanout(circuit, rounds)
+    policy.unprepare(
+        circuit,
+        circuit.qubits[0],
+        circuit.qubits[1:],
+        active_width=4,
+    )
     assert circuit.depth() == 4
     assert circuit.count_ops().get("cx", 0) == 6
 
@@ -361,15 +453,41 @@ def test_parallel_policy_reduces_sigma1_sigma3_depth_and_reports_schedule() -> N
     assert parallel_compiler.parallel_lanes == 2
     assert parallel_compiler.height_qubits == 3
     assert parallel_compiler.height_register_qubits == 6
-    assert parallel_compiler.control_fanout_qubits == 1
-    assert parallel.logical_qubits == 12
+    assert parallel_compiler.control_fanout_qubits == 0
+    assert parallel.logical_qubits == 11
+    assert all(
+        register.name != "ctrl_fanout"
+        for register in parallel.level_2_multicontrolled.qregs
+    )
     assert parallel.level_2_multicontrolled.depth() < serial.level_2_multicontrolled.depth()
     assert parallel.level_3_single_control.depth() < serial.level_3_single_control.depth()
     assert summary["generator_scheduling"] == "commuting_layers"
+    assert summary["control_distribution"] == "shared"
     assert summary["generator_layers"] == ((1, 3),)
     assert summary["parallel_lanes"] == 2
     assert summary["active_parallel_width"] == 2
-    assert summary["logical_qubits_each_level"] == 12
+    assert summary["logical_qubits_each_level"] == 11
+
+
+def test_explicit_tree_fanout_preserves_the_former_parallel_layout() -> None:
+    compiler = AJLCompiler(
+        AJLPathModel(4, 5),
+        parallel_config(control_distribution=TreeControlFanout()),
+    )
+    compilation = compiler.compile_hadamard_test("1 3", "1010")
+
+    assert compiler.control_fanout_qubits == 1
+    assert compilation.logical_qubits == 12
+    assert (
+        register_signature(compilation.level_1_varphi)
+        == register_signature(compilation.level_2_multicontrolled)
+        == register_signature(compilation.level_3_single_control)
+    )
+    assert any(
+        register.name == "ctrl_fanout" and register.size == 1
+        for register in compilation.level_2_multicontrolled.qregs
+    )
+    assert compilation_summary(compilation)["control_distribution"] == "tree_fanout"
 
 
 def test_parallel_level_2_and_level_3_are_equivalent() -> None:

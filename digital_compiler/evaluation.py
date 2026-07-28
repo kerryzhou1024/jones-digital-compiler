@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import math
 import operator
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 
+import numpy as np
 from qiskit.primitives import BaseSamplerV2, StatevectorSampler
 from qiskit.quantum_info import Statevector
 
@@ -19,7 +21,9 @@ from .policies import CompilerConfig
 EvaluationMethod = Literal["statevector", "shots"]
 EvaluationCircuitLevel = Literal[2, 3]
 ClosureType = Literal["trace", "plat"]
+PathSampling = Literal["enumerated", "ajl_weighted", "fixed_plat"]
 DEFAULT_SHOTS = 4096
+AJL_SUCCESS_PROBABILITY = 0.75
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,52 @@ class HadamardComponentEstimate:
                 "counts",
                 MappingProxyType(dict(self.counts)),
             )
+
+
+@dataclass(frozen=True)
+class TraceComponentSample:
+    """One AJL-sampled real or imaginary normalized-trace estimate."""
+
+    part: HadamardPart
+    expectation: float
+    standard_error: float
+    shots: int
+    counts: Mapping[str, int]
+    path_counts: Mapping[tuple[int, ...], int]
+
+    def __post_init__(self) -> None:
+        if self.part not in {"real", "imag"}:
+            raise ValueError("part must be 'real' or 'imag'")
+        if self.shots <= 0:
+            raise ValueError("shots must be a positive integer")
+
+        counts = {str(bitstring): int(count) for bitstring, count in self.counts.items()}
+        unexpected = set(counts) - {"0", "1"}
+        if unexpected:
+            raise ValueError(
+                "trace component counts must contain only '0' and '1', found "
+                f"{sorted(unexpected)}"
+            )
+        if any(count < 0 for count in counts.values()) or sum(counts.values()) != self.shots:
+            raise ValueError("trace component counts must sum to shots")
+
+        path_counts = {
+            tuple(path): int(count) for path, count in self.path_counts.items()
+        }
+        if (
+            any(count <= 0 for count in path_counts.values())
+            or sum(path_counts.values()) != self.shots
+        ):
+            raise ValueError("trace component path counts must be positive and sum to shots")
+
+        object.__setattr__(self, "counts", MappingProxyType(counts))
+        object.__setattr__(self, "path_counts", MappingProxyType(path_counts))
+
+    @property
+    def circuit_count(self) -> int:
+        """Return the number of unique path circuits used for this component."""
+
+        return len(self.path_counts)
 
 
 @dataclass(frozen=True)
@@ -201,15 +251,21 @@ class JonesEvaluation:
     method: EvaluationMethod
     circuit_level: EvaluationCircuitLevel
     config: CompilerConfig
-    path_estimates: tuple[PathAmplitudeEstimate, ...]
+    path_sampling: PathSampling
+    path_estimates: tuple[PathAmplitudeEstimate, ...] | None
+    trace_samples: tuple[TraceComponentSample, TraceComponentSample] | None
     markov_trace: complex | None
     value: complex
     real_standard_error: float
     imag_standard_error: float
     circuit_count: int
     shots_per_circuit: int | None
+    shots_per_component: int | None
     total_shots: int
     sampler_name: str | None
+    markov_trace_additive_error_bound: float | None
+    value_additive_error_bound: float | None
+    ajl_success_probability: float | None
 
     @property
     def strands(self) -> int:
@@ -220,7 +276,9 @@ class JonesEvaluation:
         return self.model.level
 
     @property
-    def path_amplitudes(self) -> Mapping[tuple[int, ...], complex]:
+    def path_amplitudes(self) -> Mapping[tuple[int, ...], complex] | None:
+        if self.path_estimates is None:
+            return None
         return MappingProxyType(
             {estimate.path: estimate.amplitude for estimate in self.path_estimates}
         )
@@ -229,13 +287,17 @@ class JonesEvaluation:
     def plat_amplitude(self) -> complex | None:
         """Return the single plat matrix element, or ``None`` for trace closure."""
 
-        if self.closure != "plat" or len(self.path_estimates) != 1:
+        if (
+            self.closure != "plat"
+            or self.path_estimates is None
+            or len(self.path_estimates) != 1
+        ):
             return None
         return self.path_estimates[0].amplitude
 
 
 class AJLJonesEvaluator:
-    """Evaluate small AJL closures by executing compiled Hadamard circuits."""
+    """Evaluate AJL closures by executing compiled Hadamard circuits."""
 
     def __init__(
         self,
@@ -257,7 +319,11 @@ class AJLJonesEvaluator:
         )
 
     @staticmethod
-    def _sampled_component(pub_result) -> HadamardComponentEstimate:
+    def _sampled_component(
+        pub_result,
+        *,
+        expected_shots: int | None = None,
+    ) -> HadamardComponentEstimate:
         try:
             bit_array = pub_result.data.meas
         except AttributeError:
@@ -275,6 +341,10 @@ class AJLJonesEvaluator:
         shots = sum(counts.values())
         if shots <= 0:
             raise ValueError("sampler returned no shots")
+        if expected_shots is not None and shots != expected_shots:
+            raise ValueError(
+                f"sampler returned {shots} shots but {expected_shots} were requested"
+            )
         expectation = float((counts.get("0", 0) - counts.get("1", 0)) / shots)
         standard_error = math.sqrt(max(0.0, 1.0 - expectation**2) / shots)
         return HadamardComponentEstimate(
@@ -302,7 +372,7 @@ class AJLJonesEvaluator:
             estimates[(task.path, task.part)] = self._statevector_component(circuit)
         return estimates
 
-    def _sampled_estimates(
+    def _sampled_fixed_path_estimates(
         self,
         word: BraidWord,
         tasks: tuple[CircuitTask, ...],
@@ -331,6 +401,99 @@ class AJLJonesEvaluator:
             for task, pub_result in zip(tasks, results, strict=True)
         }
 
+    def _sampled_trace_components(
+        self,
+        word: BraidWord,
+        circuit_level: EvaluationCircuitLevel,
+        shots: int,
+        sampler: BaseSamplerV2,
+        path_seed: int | None,
+    ) -> tuple[TraceComponentSample, TraceComponentSample]:
+        seed_sequence = np.random.SeedSequence(path_seed)
+        real_seed, imag_seed = seed_sequence.spawn(2)
+        sampled_paths = {
+            "real": self.model.sample_paths(
+                shots,
+                rng=np.random.default_rng(real_seed),
+            ),
+            "imag": self.model.sample_paths(
+                shots,
+                rng=np.random.default_rng(imag_seed),
+            ),
+        }
+        path_counts = {
+            part: dict(sorted(Counter(paths).items()))
+            for part, paths in sampled_paths.items()
+        }
+
+        specifications = [
+            (part, path, multiplicity)
+            for part in ("real", "imag")
+            for path, multiplicity in path_counts[part].items()
+        ]
+        pubs = [
+            (
+                self.compiler.compile_component(
+                    word,
+                    path,
+                    part,
+                    circuit_level=circuit_level,
+                    measure=True,
+                ),
+                None,
+                multiplicity,
+            )
+            for part, path, multiplicity in specifications
+        ]
+        results = sampler.run(pubs).result()
+        if len(results) != len(specifications):
+            raise ValueError(
+                f"sampler returned {len(results)} results for "
+                f"{len(specifications)} sampled trace circuits"
+            )
+
+        aggregate_counts = {
+            "real": Counter(),
+            "imag": Counter(),
+        }
+        for (part, _path, multiplicity), pub_result in zip(
+            specifications,
+            results,
+            strict=True,
+        ):
+            component = self._sampled_component(
+                pub_result,
+                expected_shots=multiplicity,
+            )
+            aggregate_counts[part].update(component.counts)
+
+        estimates = []
+        for part in ("real", "imag"):
+            counts = dict(aggregate_counts[part])
+            returned_shots = sum(counts.values())
+            if returned_shots != shots:
+                raise ValueError(
+                    f"sampler returned {returned_shots} aggregate {part} shots "
+                    f"but {shots} were requested"
+                )
+            expectation = float(
+                (counts.get("0", 0) - counts.get("1", 0)) / returned_shots
+            )
+            standard_error = math.sqrt(
+                max(0.0, 1.0 - expectation**2) / returned_shots
+            )
+            estimates.append(
+                TraceComponentSample(
+                    part=part,
+                    expectation=expectation,
+                    standard_error=standard_error,
+                    shots=returned_shots,
+                    counts=counts,
+                    path_counts=path_counts[part],
+                )
+            )
+        return estimates[0], estimates[1]
+
     def evaluate(
         self,
         word: BraidWord | str | Sequence[int],
@@ -341,6 +504,7 @@ class AJLJonesEvaluator:
         circuit_level: EvaluationCircuitLevel = 3,
         shots: int | None = None,
         seed: int | None = None,
+        path_seed: int | None = None,
         sampler: BaseSamplerV2 | None = None,
     ) -> JonesEvaluation:
         """Evaluate the numerical Jones value of a braid closure."""
@@ -356,29 +520,31 @@ class AJLJonesEvaluator:
             plat_writhe,
             writhe_name="plat_writhe",
         )
-        paths = closure_spec.paths(self.model)
-        tasks = circuit_tasks(paths)
         sampler_name = None
-        shots_per_circuit = None
 
         if method == "statevector":
             if shots is not None:
                 raise ValueError("shots can only be specified when method='shots'")
             if seed is not None:
                 raise ValueError("seed can only be specified when method='shots'")
+            if path_seed is not None:
+                raise ValueError(
+                    "path_seed can only be specified for shot-based trace evaluation"
+                )
             if sampler is not None:
                 raise ValueError("sampler can only be specified when method='shots'")
-            components = self._statevector_estimates(
-                braid_word,
-                tasks,
-                circuit_level,
-            )
+            component_shots = None
+            active_sampler = None
         else:
-            shots_per_circuit = _positive_shots(
+            component_shots = _positive_shots(
                 DEFAULT_SHOTS if shots is None else shots
             )
+            if closure_spec.kind == "plat" and path_seed is not None:
+                raise ValueError(
+                    "path_seed can only be specified for shot-based trace evaluation"
+                )
             if sampler is None:
-                active_sampler: BaseSamplerV2 = StatevectorSampler(seed=seed)
+                active_sampler = StatevectorSampler(seed=seed)
             else:
                 if seed is not None:
                     raise ValueError(
@@ -389,11 +555,80 @@ class AJLJonesEvaluator:
                     raise TypeError("sampler must implement Qiskit's BaseSamplerV2")
                 active_sampler = sampler
             sampler_name = type(active_sampler).__name__
-            components = self._sampled_estimates(
+
+        if method == "shots" and closure_spec.kind == "trace":
+            effective_path_seed = _nonnegative_path_seed(
+                seed if path_seed is None else path_seed
+            )
+            assert component_shots is not None
+            assert active_sampler is not None
+            trace_samples = self._sampled_trace_components(
+                braid_word,
+                circuit_level,
+                component_shots,
+                active_sampler,
+                effective_path_seed,
+            )
+            real_sample, imag_sample = trace_samples
+            markov_trace = complex(
+                real_sample.expectation,
+                imag_sample.expectation,
+            )
+            closure_factor = closure_spec.normalization_factor(
+                self.model,
+                braid_word,
+            )
+            value = complex(closure_factor * markov_trace)
+            real_error, imag_error = self._propagate_component_standard_errors(
+                braid_word,
+                closure_spec,
+                real_sample.standard_error,
+                imag_sample.standard_error,
+            )
+            markov_error_bound = math.sqrt(
+                32.0 * math.log(2.0) / component_shots
+            )
+            return JonesEvaluation(
+                model=self.model,
+                word=braid_word,
+                closure=closure_spec.kind,
+                plat_writhe=closure_spec.writhe,
+                method=method,
+                circuit_level=circuit_level,
+                config=self.config,
+                path_sampling="ajl_weighted",
+                path_estimates=None,
+                trace_samples=trace_samples,
+                markov_trace=markov_trace,
+                value=value,
+                real_standard_error=real_error,
+                imag_standard_error=imag_error,
+                circuit_count=sum(sample.circuit_count for sample in trace_samples),
+                shots_per_circuit=None,
+                shots_per_component=component_shots,
+                total_shots=2 * component_shots,
+                sampler_name=sampler_name,
+                markov_trace_additive_error_bound=markov_error_bound,
+                value_additive_error_bound=abs(closure_factor) * markov_error_bound,
+                ajl_success_probability=AJL_SUCCESS_PROBABILITY,
+            )
+
+        paths = closure_spec.paths(self.model)
+        tasks = circuit_tasks(paths)
+        if method == "statevector":
+            components = self._statevector_estimates(
                 braid_word,
                 tasks,
                 circuit_level,
-                shots_per_circuit,
+            )
+        else:
+            assert component_shots is not None
+            assert active_sampler is not None
+            components = self._sampled_fixed_path_estimates(
+                braid_word,
+                tasks,
+                circuit_level,
+                component_shots,
                 active_sampler,
             )
 
@@ -431,15 +666,23 @@ class AJLJonesEvaluator:
             method=method,
             circuit_level=circuit_level,
             config=self.config,
+            path_sampling=(
+                "enumerated" if closure_spec.kind == "trace" else "fixed_plat"
+            ),
             path_estimates=path_estimates,
+            trace_samples=None,
             markov_trace=markov_trace,
             value=value,
             real_standard_error=real_error,
             imag_standard_error=imag_error,
             circuit_count=len(tasks),
-            shots_per_circuit=shots_per_circuit,
+            shots_per_circuit=component_shots,
+            shots_per_component=component_shots,
             total_shots=total_shots,
             sampler_name=sampler_name,
+            markov_trace_additive_error_bound=None,
+            value_additive_error_bound=None,
+            ajl_success_probability=None,
         )
 
     def _propagate_standard_errors(
@@ -451,15 +694,29 @@ class AJLJonesEvaluator:
         raw_real_variance, raw_imag_variance = (
             closure.raw_component_variances(estimates)
         )
+        return self._propagate_component_standard_errors(
+            word,
+            closure,
+            math.sqrt(raw_real_variance),
+            math.sqrt(raw_imag_variance),
+        )
+
+    def _propagate_component_standard_errors(
+        self,
+        word: BraidWord,
+        closure: ClosureSpec,
+        raw_real_error: float,
+        raw_imag_error: float,
+    ) -> tuple[float, float]:
         closure_factor = closure.normalization_factor(self.model, word)
 
         real_variance = (
-            closure_factor.real**2 * raw_real_variance
-            + closure_factor.imag**2 * raw_imag_variance
+            closure_factor.real**2 * raw_real_error**2
+            + closure_factor.imag**2 * raw_imag_error**2
         )
         imag_variance = (
-            closure_factor.imag**2 * raw_real_variance
-            + closure_factor.real**2 * raw_imag_variance
+            closure_factor.imag**2 * raw_real_error**2
+            + closure_factor.real**2 * raw_imag_error**2
         )
         return math.sqrt(real_variance), math.sqrt(imag_variance)
 
@@ -476,6 +733,20 @@ def _positive_shots(value: object) -> int:
     return shots
 
 
+def _nonnegative_path_seed(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("path_seed must be a non-negative integer or None")
+    try:
+        seed = int(operator.index(value))
+    except TypeError:
+        raise ValueError("path_seed must be a non-negative integer or None") from None
+    if seed < 0:
+        raise ValueError("path_seed must be a non-negative integer or None")
+    return seed
+
+
 def evaluate_jones(
     word: BraidWord | str | Sequence[int],
     *,
@@ -487,6 +758,7 @@ def evaluate_jones(
     circuit_level: EvaluationCircuitLevel = 3,
     shots: int | None = None,
     seed: int | None = None,
+    path_seed: int | None = None,
     config: CompilerConfig | None = None,
     sampler: BaseSamplerV2 | None = None,
 ) -> JonesEvaluation:
@@ -511,5 +783,6 @@ def evaluate_jones(
         circuit_level=circuit_level,
         shots=shots,
         seed=seed,
+        path_seed=path_seed,
         sampler=sampler,
     )

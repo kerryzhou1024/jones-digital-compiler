@@ -145,6 +145,7 @@ def test_report_is_immutable_structured_and_has_deterministic_rich_output() -> N
         ("adder_work", 0),
     )
     assert first_dict["compiler"]["height_strategy"] == "multiplexed"
+    assert first_dict["compiler"]["control_distribution"] == "shared"
     assert "not the complete closure workload" in str(report)
     assert "not a final Clifford+T estimate" in report._repr_html_()
     assert str(report) == str(report)

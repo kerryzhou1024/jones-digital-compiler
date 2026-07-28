@@ -5,8 +5,10 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 from qiskit.primitives import BaseSamplerV2, StatevectorSampler
+from qiskit.primitives.containers import SamplerPub
 
 from digital_compiler import (
+    AJL_SUCCESS_PROBABILITY,
     DEFAULT_SHOTS,
     AJLJonesEvaluator,
     AJLPathModel,
@@ -22,12 +24,24 @@ class RecordingSampler(BaseSamplerV2):
 
     def __init__(self, seed: int = 17):
         self.delegate = StatevectorSampler(seed=seed)
-        self.calls: list[tuple[int, int | None]] = []
+        self.calls: list[tuple[int, int | None, tuple[int | None, ...]]] = []
 
     def run(self, pubs, *, shots=None):
         pubs = list(pubs)
-        self.calls.append((len(pubs), shots))
+        pub_shots = tuple(SamplerPub.coerce(pub, shots).shots for pub in pubs)
+        self.calls.append((len(pubs), shots, pub_shots))
         return self.delegate.run(pubs, shots=shots)
+
+
+class WrongShotSampler(BaseSamplerV2):
+    """Sampler double that intentionally ignores per-pub shot counts."""
+
+    def run(self, pubs, *, shots=None):
+        circuits = [
+            SamplerPub.coerce(pub, shots).circuit
+            for pub in pubs
+        ]
+        return StatevectorSampler(seed=7).run(circuits, shots=1)
 
 
 @pytest.mark.parametrize("circuit_level", [2, 3])
@@ -48,11 +62,17 @@ def test_exact_hopf_evaluation_matches_analytic_value(circuit_level: int) -> Non
     assert result.plat_amplitude is None
     assert result.circuit_level == circuit_level
     assert result.circuit_count == 4
+    assert result.path_sampling == "enumerated"
+    assert result.trace_samples is None
     assert result.shots_per_circuit is None
+    assert result.shots_per_component is None
     assert result.total_shots == 0
     assert result.sampler_name is None
     assert result.real_standard_error == 0.0
     assert result.imag_standard_error == 0.0
+    assert result.markov_trace_additive_error_bound is None
+    assert result.value_additive_error_bound is None
+    assert result.ajl_success_probability is None
     assert tuple(result.path_amplitudes) == result.model.valid_paths()
     for estimate in result.path_estimates:
         assert estimate.real.counts is None
@@ -101,6 +121,7 @@ def test_exact_four_strand_plat_uses_only_the_alternating_path(
     assert result.plat_writhe == 0
     assert result.markov_trace is None
     assert result.plat_amplitude == pytest.approx(1.0)
+    assert result.path_sampling == "fixed_plat"
     assert tuple(result.path_amplitudes) == (result.model.plat_path(),)
     assert result.circuit_count == 2
     assert result.total_shots == 0
@@ -134,20 +155,37 @@ def test_seeded_shot_evaluation_is_reproducible_and_reports_cost() -> None:
     expected = -(first.model.A**10) - first.model.A**2
 
     assert first.value == second.value
-    assert first.path_estimates == second.path_estimates
+    assert first.trace_samples == second.trace_samples
     assert first.sampler_name == "StatevectorSampler"
-    assert first.shots_per_circuit == 10_000
+    assert first.path_sampling == "ajl_weighted"
+    assert first.path_estimates is None
+    assert first.path_amplitudes is None
+    assert first.shots_per_circuit is None
+    assert first.shots_per_component == 10_000
     assert first.circuit_count == 4
-    assert first.total_shots == 40_000
+    assert first.total_shots == 20_000
+    assert first.ajl_success_probability == AJL_SUCCESS_PROBABILITY
+    expected_markov_bound = math.sqrt(32.0 * math.log(2.0) / 10_000)
+    assert first.markov_trace_additive_error_bound == pytest.approx(
+        expected_markov_bound
+    )
+    assert first.value_additive_error_bound == pytest.approx(
+        first.model.d * expected_markov_bound
+    )
+    assert abs(first.value - expected) <= first.value_additive_error_bound
     assert abs(first.value.real - expected.real) <= 5.0 * first.real_standard_error
     assert abs(first.value.imag - expected.imag) <= 5.0 * first.imag_standard_error
-    for estimate in first.path_estimates:
-        for component in (estimate.real, estimate.imag):
-            assert component.counts is not None
-            assert sum(component.counts.values()) == 10_000
-            assert component.standard_error >= 0.0
-            with pytest.raises(TypeError):
-                component.counts["0"] = 0
+    assert first.trace_samples is not None
+    assert first.trace_samples[0].path_counts != first.trace_samples[1].path_counts
+    for sample in first.trace_samples:
+        assert sample.shots == 10_000
+        assert sum(sample.counts.values()) == 10_000
+        assert sum(sample.path_counts.values()) == 10_000
+        assert sample.standard_error >= 0.0
+        with pytest.raises(TypeError):
+            sample.counts["0"] = 0
+        with pytest.raises(TypeError):
+            sample.path_counts[(1, 0)] = 0
     with pytest.raises(FrozenInstanceError):
         first.value = 0j
 
@@ -161,19 +199,9 @@ def test_shot_uncertainties_are_propagated_to_jones_components() -> None:
         shots=2048,
         seed=31,
     )
-    total_weight = math.fsum(
-        estimate.endpoint_weight for estimate in result.path_estimates
-    )
-    trace_real_variance = math.fsum(
-        (estimate.endpoint_weight / total_weight) ** 2
-        * estimate.real.standard_error**2
-        for estimate in result.path_estimates
-    )
-    trace_imag_variance = math.fsum(
-        (estimate.endpoint_weight / total_weight) ** 2
-        * estimate.imag.standard_error**2
-        for estimate in result.path_estimates
-    )
+    assert result.trace_samples is not None
+    trace_real_variance = result.trace_samples[0].standard_error**2
+    trace_imag_variance = result.trace_samples[1].standard_error**2
     factor = (-(result.model.A**3)) ** result.word.writhe
     factor *= result.model.d ** (result.model.strands - 1)
     expected_real_error = math.sqrt(
@@ -199,9 +227,79 @@ def test_custom_sampler_receives_one_batched_job() -> None:
         sampler=sampler,
     )
 
-    assert sampler.calls == [(4, 128)]
+    assert len(sampler.calls) == 1
+    pub_count, global_shots, pub_shots = sampler.calls[0]
+    assert pub_count == result.circuit_count
+    assert global_shots is None
+    assert result.trace_samples is not None
+    real_circuits = result.trace_samples[0].circuit_count
+    assert sum(pub_shots[:real_circuits]) == 128
+    assert sum(pub_shots[real_circuits:]) == 128
     assert result.sampler_name == "RecordingSampler"
-    assert result.total_shots == 512
+    assert result.total_shots == 256
+
+
+def test_trace_shots_do_not_enumerate_valid_paths(monkeypatch) -> None:
+    def fail_enumeration(_model):
+        raise AssertionError("trace shot evaluation enumerated valid paths")
+
+    monkeypatch.setattr(AJLPathModel, "valid_paths", fail_enumeration)
+    result = evaluate_jones(
+        BraidWord.identity(),
+        strands=4,
+        method="shots",
+        circuit_level=2,
+        shots=32,
+        seed=11,
+    )
+
+    assert result.path_sampling == "ajl_weighted"
+    assert result.total_shots == 64
+    assert result.trace_samples is not None
+    assert all(
+        result.model.is_valid_path(path)
+        for sample in result.trace_samples
+        for path in sample.path_counts
+    )
+
+
+def test_custom_sampler_can_use_an_independent_path_seed() -> None:
+    first = evaluate_jones(
+        "s1^2",
+        strands=2,
+        method="shots",
+        shots=128,
+        path_seed=37,
+        sampler=RecordingSampler(seed=5),
+    )
+    second = evaluate_jones(
+        "s1^2",
+        strands=2,
+        method="shots",
+        shots=128,
+        path_seed=37,
+        sampler=RecordingSampler(seed=5),
+    )
+
+    assert first.trace_samples == second.trace_samples
+    assert first.value == second.value
+
+
+def test_trace_sampler_rejects_wrong_per_pub_shot_counts() -> None:
+    with pytest.raises(ValueError, match="shots but .* were requested"):
+        evaluate_jones(
+            "s1^2",
+            strands=2,
+            method="shots",
+            shots=128,
+            path_seed=13,
+            sampler=WrongShotSampler(),
+        )
+
+
+def test_sampled_component_rejects_a_malformed_result() -> None:
+    with pytest.raises(ValueError, match="expected 'meas'"):
+        AJLJonesEvaluator._sampled_component(object())
 
 
 def test_sampled_plat_is_reproducible_and_propagates_its_normalization() -> None:
@@ -228,7 +326,11 @@ def test_sampled_plat_is_reproducible_and_propagates_its_normalization() -> None
     )
 
     assert first.path_estimates == second.path_estimates
+    assert first.path_sampling == "fixed_plat"
+    assert first.trace_samples is None
     assert first.circuit_count == 2
+    assert first.shots_per_circuit == 2048
+    assert first.shots_per_component == 2048
     assert first.total_shots == 4096
     assert first.real_standard_error == pytest.approx(expected_real_error)
     assert first.imag_standard_error == pytest.approx(expected_imag_error)
@@ -247,7 +349,7 @@ def test_custom_sampler_batches_only_two_plat_circuits() -> None:
         sampler=sampler,
     )
 
-    assert sampler.calls == [(2, 128)]
+    assert sampler.calls == [(2, 128, (128, 128))]
     assert result.total_shots == 256
 
 
@@ -259,8 +361,9 @@ def test_shot_mode_uses_documented_default() -> None:
         circuit_level=2,
         seed=3,
     )
-    assert result.shots_per_circuit == DEFAULT_SHOTS
-    assert result.total_shots == result.circuit_count * DEFAULT_SHOTS
+    assert result.shots_per_circuit is None
+    assert result.shots_per_component == DEFAULT_SHOTS
+    assert result.total_shots == 2 * DEFAULT_SHOTS
 
 
 @pytest.mark.parametrize(
@@ -283,7 +386,25 @@ def test_shot_mode_uses_documented_default() -> None:
         ({"method": "shots", "shots": 1.5}, "shots must be"),
         ({"shots": 10}, "shots can only"),
         ({"seed": 4}, "seed can only"),
+        ({"path_seed": 4}, "path_seed can only"),
         ({"sampler": RecordingSampler()}, "sampler can only"),
+        (
+            {
+                "method": "shots",
+                "closure": "plat",
+                "plat_writhe": 0,
+                "path_seed": 4,
+            },
+            "path_seed can only",
+        ),
+        (
+            {"method": "shots", "path_seed": -1},
+            "path_seed must be",
+        ),
+        (
+            {"method": "shots", "path_seed": 1.5},
+            "path_seed must be",
+        ),
         (
             {
                 "method": "shots",

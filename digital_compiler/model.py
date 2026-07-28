@@ -13,6 +13,7 @@ import operator
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Literal
 
 import numpy as np
@@ -243,6 +244,78 @@ class AJLPathModel:
 
         visit(0, 1, ())
         return tuple(paths)
+
+    @cached_property
+    def _path_completion_weights(self) -> tuple[tuple[float, ...], ...]:
+        """Return scaled AJL endpoint-weighted completion totals.
+
+        Row ``remaining`` contains totals for completing a prefix whose current
+        vertex is the row index.  A common scale factor is removed from every
+        row, which preserves all transition probabilities while avoiding
+        exponential growth with the strand count.
+        """
+
+        base = tuple(self.lambda_at(vertex) for vertex in range(self.level + 1))
+        rows = [base]
+        for _remaining in range(1, self.strands + 1):
+            previous = rows[-1]
+            current = [0.0] * (self.level + 1)
+            for vertex in self.valid_heights:
+                current[vertex] = previous[vertex - 1] + previous[vertex + 1]
+            scale = max(current)
+            if scale <= TOL:
+                raise ValueError("AJL path-completion weights have zero normalization")
+            rows.append(tuple(value / scale for value in current))
+        return tuple(rows)
+
+    def sample_paths(
+        self,
+        samples: int,
+        *,
+        rng: np.random.Generator,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Draw endpoint-weighted AJL paths without enumerating the path basis.
+
+        A complete path ``p`` is sampled with probability proportional to
+        ``lambda(endpoint(p))``.  Dynamic-programming completion weights are
+        built lazily in :math:`O(nk)` time and each draw takes :math:`O(n)`.
+        """
+
+        sample_count = _coerce_integer(samples, "samples")
+        if sample_count <= 0:
+            raise ValueError("samples must be a positive integer")
+        if not isinstance(rng, np.random.Generator):
+            raise TypeError("rng must be a numpy.random.Generator")
+
+        completion_weights = self._path_completion_weights
+        sampled_paths: list[tuple[int, ...]] = []
+        for _sample in range(sample_count):
+            vertex = 1
+            path: list[int] = []
+            for position in range(self.strands):
+                remaining = self.strands - position - 1
+                down_weight = (
+                    completion_weights[remaining][vertex - 1]
+                    if vertex > 1
+                    else 0.0
+                )
+                up_weight = (
+                    completion_weights[remaining][vertex + 1]
+                    if vertex < self.level - 1
+                    else 0.0
+                )
+                total_weight = down_weight + up_weight
+                if total_weight <= TOL:
+                    raise ValueError("AJL path sampler reached a zero-weight prefix")
+
+                if float(rng.random()) * total_weight < down_weight:
+                    path.append(0)
+                    vertex -= 1
+                else:
+                    path.append(1)
+                    vertex += 1
+            sampled_paths.append(tuple(path))
+        return tuple(sampled_paths)
 
     def plat_path(self) -> tuple[int, ...]:
         """Return the alternating AJL path used for an even-strand plat closure."""

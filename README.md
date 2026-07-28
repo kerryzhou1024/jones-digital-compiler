@@ -132,6 +132,31 @@ still contains arbitrary rotations and is not a final Clifford+T cost.
 
 ## Trace and Plat Evaluation
 
+Statevector trace evaluation enumerates the complete valid path basis and
+returns `path_estimates` and `path_amplitudes`. Shot-based trace evaluation uses
+AJL endpoint-weighted path sampling instead:
+
+```python
+sampled = problem.evaluate(
+    method="shots",
+    shots=10_000,
+    seed=7,
+)
+
+print(sampled.value)
+print(sampled.path_sampling)  # "ajl_weighted"
+print(sampled.total_shots)    # 20_000: 10_000 per complex component
+print(sampled.trace_samples)
+print(sampled.value_additive_error_bound)
+```
+
+Duplicate sampled paths are grouped into variable-shot Qiskit jobs.
+`circuit_count` is the number of unique path/component circuits, while
+`total_shots` is always twice `shots` for a complex trace estimate. A sampled
+trace does not build a complete amplitude table, so its `path_estimates` and
+`path_amplitudes` are `None`. Pass `path_seed` to control path selection
+independently when supplying a custom sampler.
+
 Select a plat closure to evaluate only `|1010...10>`:
 
 ```python
@@ -171,6 +196,7 @@ from digital_compiler import (
     CommutingLayerScheduling,
     CompilerConfig,
     JonesProblem,
+    TreeControlFanout,
 )
 
 config = CompilerConfig(
@@ -178,17 +204,28 @@ config = CompilerConfig(
 )
 problem = JonesProblem("1 3", strands=4, k=5, config=config)
 compilation = problem.compile("1010", "real")
+
+fanout_config = CompilerConfig(
+    scheduling=CommutingLayerScheduling(max_lanes=None),
+    control_distribution=TreeControlFanout(),
+)
 ```
 
 `max_lanes=None` reserves up to `strands // 2` lanes; a positive integer caps
 the width. Each lane has a separate prefix-height selector. Controlled circuits
-use a logarithmic-depth clean-control fanout tree, and clean-ancilla MCX
-workspace is partitioned by lane. Registers are reused between layers and are
-uncomputed after use.
+share one experiment control by default, so no control ancillas are required.
+Use `TreeControlFanout` to trade one clean ancilla per additional lane for
+disjoint controls prepared by a logarithmic-depth CNOT tree. Clean-ancilla MCX
+workspace remains partitioned by lane. Registers are reused between layers and
+are uncomputed after use.
 
 Only generators satisfying `abs(i - j) >= 2` can share a layer, and the
 compiler validates that a custom scheduling policy neither loses generators
-nor reorders a noncommuting pair. Prefix-height computation may still limit the
-depth improvement when simultaneous generators have overlapping prefixes.
+nor reorders a noncommuting pair. When ready work exceeds `max_lanes`, the
+scheduler prioritizes generators on the longest remaining dependency paths.
+Prefix-height computation may still limit the depth improvement when
+simultaneous generators have overlapping prefixes.
 
-See `../notebooks/compiler-demo.ipynb` for a complete walkthrough.
+See `../notebooks/parallel-generators.ipynb` for the scheduling and
+control-distribution experiments, and `../notebooks/compiler-demo.ipynb` for a
+complete walkthrough.

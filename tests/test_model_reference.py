@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 import numpy as np
 import pytest
@@ -84,6 +85,30 @@ def test_valid_paths_are_boundary_pruned_and_deterministic(
     model = AJLPathModel(strands, level)
     assert model.valid_paths() == expected
     assert all(model.is_valid_path(path) for path in expected)
+
+
+def test_sampled_paths_follow_endpoint_weight_distribution_without_enumeration() -> None:
+    model = AJLPathModel(strands=4, level=5)
+    paths = model.valid_paths()
+    weights = model.endpoint_weights(paths)
+    normalization = math.fsum(weights)
+    sampled = model.sample_paths(50_000, rng=np.random.default_rng(29))
+    frequencies = Counter(sampled)
+
+    assert all(model.is_valid_path(path) for path in sampled)
+    assert set(frequencies) == set(paths)
+    for path, weight in zip(paths, weights, strict=True):
+        assert frequencies[path] / len(sampled) == pytest.approx(
+            weight / normalization,
+            abs=0.01,
+        )
+
+
+@pytest.mark.parametrize("samples", [0, -1, 1.5, True])
+def test_path_sampler_rejects_invalid_sample_counts(samples) -> None:
+    model = AJLPathModel(strands=2, level=5)
+    with pytest.raises(ValueError, match="samples must be"):
+        model.sample_paths(samples, rng=np.random.default_rng(3))
 
 
 def test_plat_path_is_alternating_and_requires_even_strands() -> None:
