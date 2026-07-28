@@ -10,6 +10,11 @@ from typing import Literal
 
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 
+from .fault_tolerance import (
+    CliffordTCompilation,
+    CliffordTCompiler,
+    LogicalResourceReport,
+)
 from .lowering import SingleControlLowerer, assert_level_2_contract
 from .model import AJLPathModel, BraidGenerator, BraidWord, HadamardPart
 from .policies import (
@@ -26,12 +31,10 @@ from .primitives import (
 )
 
 LEVEL_4_STATUS = (
-    "Not implemented: choose a rotation-synthesis algorithm, total approximation "
-    "tolerance, and error-allocation policy before producing logical Clifford+T. "
-    "Surface-code mapping and scheduling are downstream tasks."
+    "Level 4 is not configured; supply CompilerConfig(level4=CliffordTConfig(...))."
 )
 
-CompilerLevel = Literal[1, 2, 3]
+CompilerLevel = Literal[1, 2, 3, 4]
 
 
 def register_signature(
@@ -55,18 +58,26 @@ class HadamardTestCompilation:
     level_3_single_control: QuantumCircuit
     config: CompilerConfig
     level_4_clifford_t: QuantumCircuit | None = None
+    level_4_resources: LogicalResourceReport | None = None
     level_4_status: str = LEVEL_4_STATUS
 
     def __post_init__(self) -> None:
-        signatures = {
-            register_signature(self.level_1_varphi),
-            register_signature(self.level_2_multicontrolled),
-            register_signature(self.level_3_single_control),
-        }
-        if len(signatures) != 1:
-            raise ValueError("Levels 1, 2, and 3 must have identical register layouts")
+        circuits = [
+            self.level_1_varphi,
+            self.level_2_multicontrolled,
+            self.level_3_single_control,
+        ]
         if self.level_4_clifford_t is not None:
-            raise ValueError("Level 4 is intentionally not implemented")
+            circuits.append(self.level_4_clifford_t)
+        signatures = {register_signature(circuit) for circuit in circuits}
+        if len(signatures) != 1:
+            raise ValueError("compiler levels must have identical register layouts")
+        if (self.level_4_clifford_t is None) != (
+            self.level_4_resources is None
+        ):
+            raise ValueError(
+                "Level 4 circuit and resource report must be provided together"
+            )
 
     @property
     def path_label(self) -> str:
@@ -103,6 +114,11 @@ class AJLCompiler:
     ):
         self.model = model
         self.config = CompilerConfig() if config is None else config
+        self._clifford_t_compiler = (
+            None
+            if self.config.level4 is None
+            else CliffordTCompiler(self.config.level4)
+        )
         self.strands = model.strands
         self.level = model.level
         self.height_selector_qubits = max(1, math.ceil(math.log2(self.level)))
@@ -548,6 +564,17 @@ class AJLCompiler:
     def lower_to_level_3(self, level_2_circuit: QuantumCircuit) -> QuantumCircuit:
         return self.lowerer.lower(level_2_circuit)
 
+    def lower_to_level_4(
+        self,
+        level_3_circuit: QuantumCircuit,
+    ) -> CliffordTCompilation:
+        if self._clifford_t_compiler is None:
+            raise ValueError(
+                "circuit_level=4 requires "
+                "CompilerConfig(level4=CliffordTConfig(...))"
+            )
+        return self._clifford_t_compiler.compile(level_3_circuit)
+
     def level_2_braid_circuit(
         self,
         word: BraidWord | str | Sequence[int],
@@ -781,6 +808,21 @@ class AJLCompiler:
         )
         return level_3
 
+    def level_4_clifford_t_circuit(
+        self,
+        word: BraidWord | str | Sequence[int],
+        initial_path: str | Sequence[int],
+        part: HadamardPart = "real",
+        measure: bool = True,
+    ) -> QuantumCircuit:
+        level_3 = self.level_3_single_control_circuit(
+            word,
+            initial_path,
+            part,
+            measure=measure,
+        )
+        return self.lower_to_level_4(level_3).circuit
+
     def compile_component(
         self,
         word: BraidWord | str | Sequence[int],
@@ -813,7 +855,14 @@ class AJLCompiler:
                 part,
                 measure=measure,
             )
-        raise ValueError("circuit_level must be 1, 2, or 3")
+        if circuit_level == 4:
+            return self.level_4_clifford_t_circuit(
+                word,
+                initial_path,
+                part,
+                measure=measure,
+            )
+        raise ValueError("circuit_level must be 1, 2, 3, or 4")
 
     def compile_hadamard_test(
         self,
@@ -837,6 +886,11 @@ class AJLCompiler:
             "level_2_multicontrolled",
             "level_3_single_control",
         )
+        level_4 = (
+            None
+            if self._clifford_t_compiler is None
+            else self.lower_to_level_4(level_3)
+        )
         return HadamardTestCompilation(
             word=braid_word,
             initial_path=path_bits,
@@ -850,4 +904,11 @@ class AJLCompiler:
             level_2_multicontrolled=level_2,
             level_3_single_control=level_3,
             config=self.config,
+            level_4_clifford_t=None if level_4 is None else level_4.circuit,
+            level_4_resources=None if level_4 is None else level_4.resources,
+            level_4_status=(
+                LEVEL_4_STATUS
+                if level_4 is None
+                else "Compiled approximate logical Clifford+T circuit."
+            ),
         )

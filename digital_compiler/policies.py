@@ -939,6 +939,67 @@ class Level3Policy:
 
 
 @dataclass(frozen=True)
+class CliffordTConfig:
+    """Configuration for approximate Level-4 Clifford+T synthesis."""
+
+    synthesis_error_budget: float
+    optimization_level: int = 2
+    seed_transpiler: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.synthesis_error_budget, bool):
+            raise ValueError(
+                "synthesis_error_budget must be finite and in (0, 1]"
+            )
+        try:
+            error = float(self.synthesis_error_budget)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "synthesis_error_budget must be finite and in (0, 1]"
+            ) from None
+        if not math.isfinite(error) or not 0.0 < error <= 1.0:
+            raise ValueError(
+                "synthesis_error_budget must be finite and in (0, 1]"
+            )
+
+        if isinstance(self.optimization_level, bool):
+            raise ValueError("optimization_level must be an integer in 0..3")
+        try:
+            optimization_level = int(operator.index(self.optimization_level))
+        except TypeError:
+            raise ValueError(
+                "optimization_level must be an integer in 0..3"
+            ) from None
+        if optimization_level not in range(4):
+            raise ValueError("optimization_level must be an integer in 0..3")
+
+        if isinstance(self.seed_transpiler, bool):
+            raise ValueError("seed_transpiler must be a non-negative integer")
+        try:
+            seed_transpiler = int(operator.index(self.seed_transpiler))
+        except TypeError:
+            raise ValueError(
+                "seed_transpiler must be a non-negative integer"
+            ) from None
+        if seed_transpiler < 0:
+            raise ValueError("seed_transpiler must be a non-negative integer")
+
+        object.__setattr__(self, "synthesis_error_budget", error)
+        object.__setattr__(self, "optimization_level", optimization_level)
+        object.__setattr__(self, "seed_transpiler", seed_transpiler)
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "synthesis_error_budget": self.synthesis_error_budget,
+            "optimization_level": self.optimization_level,
+            "seed_transpiler": self.seed_transpiler,
+            "allocation": "uniform",
+            "cache_error": 0.0,
+            "method": "qiskit_gridsynth",
+        }
+
+
+@dataclass(frozen=True)
 class CompilerConfig:
     """Immutable collection of independently replaceable compiler policies."""
 
@@ -951,6 +1012,7 @@ class CompilerConfig:
         default_factory=SharedControl
     )
     prefix_height: PrefixHeightPolicy = field(default_factory=RollingPrefixHeight)
+    level4: CliffordTConfig | None = None
 
     def metadata(self) -> dict[str, object]:
         return {
@@ -959,4 +1021,5 @@ class CompilerConfig:
             "generator_scheduling": self.scheduling.metadata(),
             "control_distribution": self.control_distribution.metadata(),
             "prefix_height": self.prefix_height.metadata(),
+            "level_4": None if self.level4 is None else self.level4.metadata(),
         }

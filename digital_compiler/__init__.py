@@ -21,6 +21,13 @@ from .evaluation import (
     TraceComponentSample,
     evaluate_jones,
 )
+from .fault_tolerance import (
+    CliffordTCompilation,
+    CliffordTCompiler,
+    LogicalResourceReport,
+    assert_clifford_t_contract,
+    t_layer_widths,
+)
 from .lowering import assert_level_2_contract, assert_level_3_contract
 from .model import (
     TOL,
@@ -33,6 +40,7 @@ from .model import (
 )
 from .policies import (
     CleanAncillaMCX,
+    CliffordTConfig,
     CommutingLayerScheduling,
     CompilerConfig,
     ControlDistributionPolicy,
@@ -81,6 +89,7 @@ from .reporting import (
     level_1_varphi_names,
     level_2_gate_family_counts,
     level_3_gate_family_counts,
+    level_4_gate_family_counts,
     print_compilation_summary,
 )
 
@@ -92,6 +101,9 @@ __all__ = [
     "BraidGenerator",
     "BraidWord",
     "CleanAncillaMCX",
+    "CliffordTCompilation",
+    "CliffordTCompiler",
+    "CliffordTConfig",
     "ClosureType",
     "CommutingLayerScheduling",
     "CircuitLevelSelection",
@@ -113,6 +125,7 @@ __all__ = [
     "HeightSynthesisPolicy",
     "LEVEL_4_STATUS",
     "Level3Policy",
+    "LogicalResourceReport",
     "JonesEvaluation",
     "JonesProblem",
     "MCPhaseDecomposer",
@@ -145,6 +158,7 @@ __all__ = [
     "append_uniformly_controlled_ry",
     "assert_level_2_contract",
     "assert_level_3_contract",
+    "assert_clifford_t_contract",
     "circuit_gate_count_depth",
     "clean_complex",
     "coerce_braid_word",
@@ -156,7 +170,9 @@ __all__ = [
     "level_1_varphi_names",
     "level_2_gate_family_counts",
     "level_3_gate_family_counts",
+    "level_4_gate_family_counts",
     "prepare_basis_path",
     "print_compilation_summary",
     "register_signature",
+    "t_layer_widths",
 ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from html import escape
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -13,6 +13,11 @@ from qiskit import QuantumCircuit
 from qiskit.circuit import ControlledGate, Gate
 
 from .compiler import CompilerLevel, HadamardTestCompilation, register_signature
+from .fault_tolerance import (
+    CLIFFORD_GATE_NAMES,
+    T_GATE_NAMES,
+    t_layer_widths,
+)
 
 if TYPE_CHECKING:
     from .problem import CompiledCircuit
@@ -103,6 +108,7 @@ class CircuitInfo:
     non_gate_operations: Mapping[str, int]
     gate_families: Mapping[str, int]
     exact_gate_stats: Mapping[str, Mapping[str, int]]
+    level_4_resources: Mapping[str, object] | None
     compiler_policies: Mapping[str, object]
     scope_notes: tuple[str, ...]
 
@@ -138,13 +144,14 @@ class CircuitInfo:
             "gates": {
                 "families": _thaw(self.gate_families),
                 "exact": _thaw(self.exact_gate_stats),
+                "clifford_t": _thaw(self.level_4_resources),
             },
             "compiler": _thaw(self.compiler_policies),
             "scope_notes": self.scope_notes,
         }
 
     def _summary_rows(self) -> list[tuple[object, ...]]:
-        return [
+        rows = [
             ("word", self.word),
             ("closure", self.closure),
             ("path", f"|{self.path_label}>"),
@@ -158,6 +165,16 @@ class CircuitInfo:
             ("Qiskit circuit depth", self.circuit_depth),
             ("measurements", self.measurement_count),
         ]
+        if self.level_4_resources is not None:
+            rows.extend(
+                (
+                    ("T count", self.level_4_resources["t_count"]),
+                    ("T depth", self.level_4_resources["t_depth"]),
+                    ("CX count", self.level_4_resources["cx_count"]),
+                    ("CX depth", self.level_4_resources["cx_depth"]),
+                )
+            )
+        return rows
 
     def _policy_rows(self) -> list[tuple[object, ...]]:
         rows: list[tuple[object, ...]] = []
@@ -370,6 +387,16 @@ def _level_3_gate_family(operation: Gate, *, strict: bool) -> str:
     return operation.name
 
 
+def _level_4_gate_family(operation: Gate, *, strict: bool) -> str:
+    if operation.name in CLIFFORD_GATE_NAMES:
+        return "Clifford"
+    if operation.name in T_GATE_NAMES:
+        return "T"
+    if strict:
+        raise AssertionError(f"unexpected Level-4 gate {operation.name!r}")
+    return operation.name
+
+
 def _gate_family(
     operation: Gate,
     compiler_level: CompilerLevel,
@@ -380,7 +407,9 @@ def _gate_family(
         return _level_1_gate_family(operation)
     if compiler_level == 2:
         return _level_2_gate_family(operation, strict=strict)
-    return _level_3_gate_family(operation, strict=strict)
+    if compiler_level == 3:
+        return _level_3_gate_family(operation, strict=strict)
+    return _level_4_gate_family(operation, strict=strict)
 
 
 def _exact_gate_stats(
@@ -414,12 +443,18 @@ def _gate_family_counts(
     circuit: QuantumCircuit,
     compiler_level: CompilerLevel,
 ) -> dict[str, int]:
-    families: dict[str, int] = {}
+    families: dict[str, int] = (
+        {"Clifford": 0, "T": 0} if compiler_level == 4 else {}
+    )
     for instruction in circuit.data:
         operation = instruction.operation
         if not isinstance(operation, Gate):
             continue
-        family = _gate_family(operation, compiler_level)
+        family = _gate_family(
+            operation,
+            compiler_level,
+            strict=compiler_level == 4,
+        )
         families[family] = families.get(family, 0) + 1
     return dict(sorted(families.items()))
 
@@ -438,7 +473,9 @@ def _legacy_gate_family_counts(
     circuit: QuantumCircuit,
     compiler_level: CompilerLevel,
 ) -> dict[str, int]:
-    families: dict[str, int] = {}
+    families: dict[str, int] = (
+        {"Clifford": 0, "T": 0} if compiler_level == 4 else {}
+    )
     for instruction in circuit.data:
         operation = instruction.operation
         name = operation.name
@@ -474,6 +511,7 @@ def _compiler_policy_summary(
         "parallel_lanes": metadata.get("parallel_lanes"),
         "active_parallel_width": metadata.get("active_parallel_width"),
         "lowering_policies": metadata.get("lowering_policies"),
+        "clifford_t_synthesis": metadata.get("clifford_t_synthesis"),
         "configuration": metadata.get(
             "compiler_config",
             fallback_configuration,
@@ -512,6 +550,52 @@ def circuit_info(compiled: CompiledCircuit) -> CircuitInfo:
             "Arbitrary rotations remain unsynthesized; this is not a final "
             "Clifford+T estimate."
         )
+    if compiled.circuit_level == 4:
+        scope_notes.append(
+            "Approximate logical Clifford+T circuit; excludes physical "
+            "mapping, routing, surface-code cycles, and factories."
+        )
+
+    level_4_resources = None
+    if compiled.circuit_level == 4:
+        names = [
+            instruction.operation.name
+            for instruction in circuit.data
+            if isinstance(instruction.operation, Gate)
+        ]
+        layers = t_layer_widths(circuit)
+        synthesis = (circuit.metadata or {}).get(
+            "clifford_t_synthesis",
+            {},
+        )
+        level_4_resources = {
+            "clifford_count": sum(
+                name in CLIFFORD_GATE_NAMES for name in names
+            ),
+            "clifford_depth": circuit.depth(
+                lambda instruction: (
+                    isinstance(instruction.operation, Gate)
+                    and instruction.operation.name in CLIFFORD_GATE_NAMES
+                )
+            ),
+            "cx_count": sum(name == "cx" for name in names),
+            "cx_depth": circuit.depth(
+                lambda instruction: instruction.operation.name == "cx"
+            ),
+            "t_gate_count": sum(name == "t" for name in names),
+            "tdg_gate_count": sum(name == "tdg" for name in names),
+            "t_count": sum(name in T_GATE_NAMES for name in names),
+            "t_depth": len(layers),
+            "t_layer_widths": layers,
+            "original_rz_count": synthesis.get("original_rz_count"),
+            "arbitrary_rotation_count": synthesis.get(
+                "arbitrary_rotation_count"
+            ),
+            "synthesis_error_budget": synthesis.get(
+                "synthesis_error_budget"
+            ),
+            "per_rotation_error": synthesis.get("per_rotation_error"),
+        }
 
     return CircuitInfo(
         word=word,
@@ -540,6 +624,11 @@ def circuit_info(compiled: CompiledCircuit) -> CircuitInfo:
             _gate_family_counts(circuit, compiled.circuit_level)
         ),
         exact_gate_stats=_freeze(exact_stats),
+        level_4_resources=(
+            None
+            if level_4_resources is None
+            else _freeze(level_4_resources)
+        ),
         compiler_policies=_freeze(
             _compiler_policy_summary(circuit, fallback_configuration)
         ),
@@ -617,9 +706,14 @@ def level_3_gate_family_counts(circuit: QuantumCircuit) -> dict[str, int]:
     return _legacy_gate_family_counts(circuit, 3)
 
 
+def level_4_gate_family_counts(circuit: QuantumCircuit) -> dict[str, int]:
+    return _gate_family_counts(circuit, 4)
+
+
 def compilation_summary(compilation: HadamardTestCompilation) -> dict[str, object]:
     level_2_metadata = compilation.level_2_multicontrolled.metadata or {}
     level_3_metadata = compilation.level_3_single_control.metadata or {}
+    level_4 = compilation.level_4_clifford_t
     return {
         "word": str(compilation.word),
         "signed_generators": compilation.word.signed_indices(),
@@ -667,6 +761,20 @@ def compilation_summary(compilation: HadamardTestCompilation) -> dict[str, objec
             compilation.level_3_single_control
         ),
         "level_4": compilation.level_4_status,
+        "level_4_compiler_level": (
+            None if level_4 is None else level_4.metadata.get("compiler_level")
+        ),
+        "level_4_gate_families": (
+            None if level_4 is None else level_4_gate_family_counts(level_4)
+        ),
+        "level_4_gate_count_depth": (
+            None if level_4 is None else circuit_gate_count_depth(level_4)
+        ),
+        "level_4_resources": (
+            None
+            if compilation.level_4_resources is None
+            else asdict(compilation.level_4_resources)
+        ),
     }
 
 
@@ -699,6 +807,7 @@ def print_compilation_summary(compilation: HadamardTestCompilation) -> None:
         "level_1_gate_count_depth",
         "level_2_gate_count_depth",
         "level_3_gate_count_depth",
+        "level_4_gate_count_depth",
     }
     hidden_keys = {
         "level_1_depth",
@@ -707,6 +816,9 @@ def print_compilation_summary(compilation: HadamardTestCompilation) -> None:
         "level_3_depth",
         "level_3_gate_families",
         "level_4",
+        "level_4_compiler_level",
+        "level_4_gate_families",
+        "level_4_resources",
         *table_keys,
     }
     for key, value in summary.items():
@@ -726,5 +838,12 @@ def print_compilation_summary(compilation: HadamardTestCompilation) -> None:
         "Level 3 — exact gate count | depth",
         summary["level_3_gate_count_depth"],
     )
-    print(f"\nlevel_4: {summary['level_4']}")
+    if summary["level_4_gate_count_depth"] is None:
+        print(f"\nlevel_4: {summary['level_4']}")
+    else:
+        _print_gate_count_depth_table(
+            "Level 4 — exact gate count | depth",
+            summary["level_4_gate_count_depth"],
+        )
+        print(f"\nlevel_4_resources: {summary['level_4_resources']}")
     print()

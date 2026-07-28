@@ -257,11 +257,16 @@ class JonesProblem:
                     task.part,
                     measure=measure,
                 )
-                for level, circuit in (
+                selected_circuits: list[tuple[CompilerLevel, QuantumCircuit]] = [
                     (1, compilation.level_1_varphi),
                     (2, compilation.level_2_multicontrolled),
                     (3, compilation.level_3_single_control),
-                ):
+                ]
+                if compilation.level_4_clifford_t is not None:
+                    selected_circuits.append(
+                        (4, compilation.level_4_clifford_t)
+                    )
+                for level, circuit in selected_circuits:
                     yield CompiledCircuit(
                         path=task.path,
                         part=task.part,

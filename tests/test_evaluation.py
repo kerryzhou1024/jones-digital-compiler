@@ -13,6 +13,9 @@ from digital_compiler import (
     AJLJonesEvaluator,
     AJLPathModel,
     BraidWord,
+    CliffordTConfig,
+    CompilerConfig,
+    assert_clifford_t_contract,
     evaluate_jones,
 )
 
@@ -25,10 +28,13 @@ class RecordingSampler(BaseSamplerV2):
     def __init__(self, seed: int = 17):
         self.delegate = StatevectorSampler(seed=seed)
         self.calls: list[tuple[int, int | None, tuple[int | None, ...]]] = []
+        self.circuits = []
 
     def run(self, pubs, *, shots=None):
         pubs = list(pubs)
-        pub_shots = tuple(SamplerPub.coerce(pub, shots).shots for pub in pubs)
+        normalized = [SamplerPub.coerce(pub, shots) for pub in pubs]
+        pub_shots = tuple(pub.shots for pub in normalized)
+        self.circuits.extend(pub.circuit for pub in normalized)
         self.calls.append((len(pubs), shots, pub_shots))
         return self.delegate.run(pubs, shots=shots)
 
@@ -72,6 +78,8 @@ def test_exact_hopf_evaluation_matches_analytic_value(circuit_level: int) -> Non
     assert result.imag_standard_error == 0.0
     assert result.markov_trace_additive_error_bound is None
     assert result.value_additive_error_bound is None
+    assert result.synthesis_error_budget_per_circuit is None
+    assert result.value_synthesis_error_bound is None
     assert result.ajl_success_probability is None
     assert tuple(result.path_amplitudes) == result.model.valid_paths()
     for estimate in result.path_estimates:
@@ -125,6 +133,102 @@ def test_exact_four_strand_plat_uses_only_the_alternating_path(
     assert tuple(result.path_amplitudes) == (result.model.plat_path(),)
     assert result.circuit_count == 2
     assert result.total_shots == 0
+
+
+@pytest.mark.parametrize(
+    "closure_options",
+    [
+        {},
+        {"closure": "plat", "plat_writhe": -1},
+    ],
+)
+def test_level_4_statevector_evaluation_respects_synthesis_bound(
+    closure_options: dict[str, object],
+) -> None:
+    config = CompilerConfig(level4=CliffordTConfig(1e-3))
+    word = "s1^2" if not closure_options else "s1"
+    level_3 = evaluate_jones(
+        word,
+        strands=2,
+        circuit_level=3,
+        **closure_options,
+    )
+    level_4 = evaluate_jones(
+        word,
+        strands=2,
+        circuit_level=4,
+        config=config,
+        **closure_options,
+    )
+
+    assert level_4.value_synthesis_error_bound is not None
+    assert (
+        abs(level_4.value - level_3.value)
+        <= level_4.value_synthesis_error_bound
+    )
+    assert level_4.synthesis_error_budget_per_circuit == 1e-3
+    assert level_4.real_standard_error == 0.0
+    assert level_4.imag_standard_error == 0.0
+
+
+def test_exact_level_4_evaluation_reports_zero_synthesis_bound() -> None:
+    result = evaluate_jones(
+        BraidWord.identity(),
+        strands=2,
+        circuit_level=4,
+        config=CompilerConfig(level4=CliffordTConfig(1e-3)),
+    )
+
+    assert result.synthesis_error_budget_per_circuit == 1e-3
+    assert result.value_synthesis_error_bound == 0.0
+
+
+def test_level_4_trace_shots_preserve_batching_and_sampling() -> None:
+    sampler = RecordingSampler(seed=29)
+    result = evaluate_jones(
+        "s1^2",
+        strands=2,
+        method="shots",
+        circuit_level=4,
+        shots=64,
+        path_seed=13,
+        sampler=sampler,
+        config=CompilerConfig(level4=CliffordTConfig(1e-3)),
+    )
+
+    assert len(sampler.calls) == 1
+    assert sampler.calls[0][0] == result.circuit_count
+    assert sum(shot for shot in sampler.calls[0][2] if shot is not None) == 128
+    assert result.total_shots == 128
+    assert result.trace_samples is not None
+    assert result.value_synthesis_error_bound is not None
+    assert all(
+        sample.circuit_count < sample.shots
+        for sample in result.trace_samples
+    )
+    for circuit in sampler.circuits:
+        assert_clifford_t_contract(circuit)
+
+
+def test_level_4_plat_shots_are_seeded_and_use_two_circuits() -> None:
+    kwargs = {
+        "strands": 2,
+        "closure": "plat",
+        "plat_writhe": -1,
+        "method": "shots",
+        "circuit_level": 4,
+        "shots": 64,
+        "seed": 41,
+        "config": CompilerConfig(level4=CliffordTConfig(1e-3)),
+    }
+    first = evaluate_jones("s1", **kwargs)
+    second = evaluate_jones("s1", **kwargs)
+
+    assert first.value == second.value
+    assert first.path_estimates == second.path_estimates
+    assert first.circuit_count == 2
+    assert first.total_shots == 128
+    assert first.value_synthesis_error_bound is not None
 
 
 def test_plat_uses_oriented_closure_writhe_not_braid_exponent_sum() -> None:

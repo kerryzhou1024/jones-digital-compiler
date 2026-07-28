@@ -128,7 +128,40 @@ comparison.as_dict()    # structured research data
 
 These are pre-transpilation, single-circuit logical resources. They are not
 physical-qubit, surface-code, or total closure-workload estimates. Level 3
-still contains arbitrary rotations and is not a final Clifford+T cost.
+retains its detailed gate-family view and still contains arbitrary rotations.
+
+## Level 4 Clifford+T
+
+Level 4 is opt-in because arbitrary rotations require an explicit approximation
+budget:
+
+```python
+from digital_compiler import CliffordTConfig, CompilerConfig, JonesProblem
+
+config = CompilerConfig(
+    level4=CliffordTConfig(
+        synthesis_error_budget=1e-3,
+        optimization_level=2,
+        seed_transpiler=0,
+    )
+)
+problem = JonesProblem("s1^2", strands=2, k=5, config=config)
+
+level_4 = problem.circuit("10", "real", circuit_level=4)
+print(level_4.info())
+
+approximate = problem.evaluate(circuit_level=4)
+print(approximate.value)
+print(approximate.value_synthesis_error_bound)
+```
+
+The compiler translates Level 3 through an exact Clifford+Rz boundary, replaces
+exact pi/4 rotations, uniformly allocates the circuit synthesis budget across
+the remaining Rz rotations, and uses Qiskit's Gridsynth-backed Rz synthesis.
+Level 4 reports the `Clifford` and `T` families together with exact gate
+statistics, T count and depth, T-layer widths, and synthesis provenance.
+It remains a logical circuit: physical routing, surface-code cycles, magic-state
+factories, and physical-qubit estimates are downstream concerns.
 
 ## Trace and Plat Evaluation
 

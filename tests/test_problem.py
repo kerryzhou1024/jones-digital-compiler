@@ -236,7 +236,7 @@ def test_problem_circuit_filters_reject_invalid_selections() -> None:
 
     with pytest.raises(ValueError, match="part must be"):
         tuple(problem.circuits(part="magnitude"))
-    with pytest.raises(ValueError, match="circuit_level must be"):
+    with pytest.raises(ValueError, match="CliffordTConfig"):
         tuple(problem.circuits(circuit_level=4))
 
 

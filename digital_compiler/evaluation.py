@@ -19,7 +19,7 @@ from .model import AJLPathModel, BraidWord, HadamardPart
 from .policies import CompilerConfig
 
 EvaluationMethod = Literal["statevector", "shots"]
-EvaluationCircuitLevel = Literal[2, 3]
+EvaluationCircuitLevel = Literal[2, 3, 4]
 ClosureType = Literal["trace", "plat"]
 PathSampling = Literal["enumerated", "ajl_weighted", "fixed_plat"]
 DEFAULT_SHOTS = 4096
@@ -265,6 +265,8 @@ class JonesEvaluation:
     sampler_name: str | None
     markov_trace_additive_error_bound: float | None
     value_additive_error_bound: float | None
+    synthesis_error_budget_per_circuit: float | None
+    value_synthesis_error_bound: float | None
     ajl_success_probability: float | None
 
     @property
@@ -354,13 +356,27 @@ class AJLJonesEvaluator:
             counts=counts,
         )
 
+    @staticmethod
+    def _effective_synthesis_budget(circuit) -> float:
+        metadata = circuit.metadata or {}
+        synthesis = metadata.get("clifford_t_synthesis")
+        if not isinstance(synthesis, Mapping):
+            return 0.0
+        if int(synthesis.get("arbitrary_rotation_count", 0)) == 0:
+            return 0.0
+        return float(synthesis["synthesis_error_budget"])
+
     def _statevector_estimates(
         self,
         word: BraidWord,
         tasks: tuple[CircuitTask, ...],
         circuit_level: EvaluationCircuitLevel,
-    ) -> dict[tuple[tuple[int, ...], str], HadamardComponentEstimate]:
+    ) -> tuple[
+        dict[tuple[tuple[int, ...], str], HadamardComponentEstimate],
+        float,
+    ]:
         estimates = {}
+        effective_synthesis_budget = 0.0
         for task in tasks:
             circuit = self.compiler.compile_component(
                 word,
@@ -369,8 +385,12 @@ class AJLJonesEvaluator:
                 circuit_level=circuit_level,
                 measure=False,
             )
+            effective_synthesis_budget = max(
+                effective_synthesis_budget,
+                self._effective_synthesis_budget(circuit),
+            )
             estimates[(task.path, task.part)] = self._statevector_component(circuit)
-        return estimates
+        return estimates, effective_synthesis_budget
 
     def _sampled_fixed_path_estimates(
         self,
@@ -379,7 +399,10 @@ class AJLJonesEvaluator:
         circuit_level: EvaluationCircuitLevel,
         shots: int,
         sampler: BaseSamplerV2,
-    ) -> dict[tuple[tuple[int, ...], str], HadamardComponentEstimate]:
+    ) -> tuple[
+        dict[tuple[tuple[int, ...], str], HadamardComponentEstimate],
+        float,
+    ]:
         circuits = [
             self.compiler.compile_component(
                 word,
@@ -396,10 +419,19 @@ class AJLJonesEvaluator:
             raise ValueError(
                 f"sampler returned {len(results)} results for {len(tasks)} circuits"
             )
-        return {
-            (task.path, task.part): self._sampled_component(pub_result)
-            for task, pub_result in zip(tasks, results, strict=True)
-        }
+        return (
+            {
+                (task.path, task.part): self._sampled_component(pub_result)
+                for task, pub_result in zip(tasks, results, strict=True)
+            },
+            max(
+                (
+                    self._effective_synthesis_budget(circuit)
+                    for circuit in circuits
+                ),
+                default=0.0,
+            ),
+        )
 
     def _sampled_trace_components(
         self,
@@ -408,7 +440,7 @@ class AJLJonesEvaluator:
         shots: int,
         sampler: BaseSamplerV2,
         path_seed: int | None,
-    ) -> tuple[TraceComponentSample, TraceComponentSample]:
+    ) -> tuple[TraceComponentSample, TraceComponentSample, float]:
         seed_sequence = np.random.SeedSequence(path_seed)
         real_seed, imag_seed = seed_sequence.spawn(2)
         sampled_paths = {
@@ -431,19 +463,23 @@ class AJLJonesEvaluator:
             for part in ("real", "imag")
             for path, multiplicity in path_counts[part].items()
         ]
-        pubs = [
-            (
-                self.compiler.compile_component(
-                    word,
-                    path,
-                    part,
-                    circuit_level=circuit_level,
-                    measure=True,
-                ),
-                None,
-                multiplicity,
+        circuits = [
+            self.compiler.compile_component(
+                word,
+                path,
+                part,
+                circuit_level=circuit_level,
+                measure=True,
             )
-            for part, path, multiplicity in specifications
+            for part, path, _multiplicity in specifications
+        ]
+        pubs = [
+            (circuit, None, multiplicity)
+            for circuit, (_part, _path, multiplicity) in zip(
+                circuits,
+                specifications,
+                strict=True,
+            )
         ]
         results = sampler.run(pubs).result()
         if len(results) != len(specifications):
@@ -492,7 +528,17 @@ class AJLJonesEvaluator:
                     path_counts=path_counts[part],
                 )
             )
-        return estimates[0], estimates[1]
+        return (
+            estimates[0],
+            estimates[1],
+            max(
+                (
+                    self._effective_synthesis_budget(circuit)
+                    for circuit in circuits
+                ),
+                default=0.0,
+            ),
+        )
 
     def evaluate(
         self,
@@ -511,8 +557,13 @@ class AJLJonesEvaluator:
 
         if method not in {"statevector", "shots"}:
             raise ValueError("method must be 'statevector' or 'shots'")
-        if circuit_level not in {2, 3}:
-            raise ValueError("circuit_level must be 2 or 3")
+        if circuit_level not in {2, 3, 4}:
+            raise ValueError("circuit_level must be 2, 3, or 4")
+        if circuit_level == 4 and self.config.level4 is None:
+            raise ValueError(
+                "circuit_level=4 requires "
+                "CompilerConfig(level4=CliffordTConfig(...))"
+            )
 
         braid_word = self.model.as_braid_word(word)
         closure_spec = _normalize_closure(
@@ -562,14 +613,18 @@ class AJLJonesEvaluator:
             )
             assert component_shots is not None
             assert active_sampler is not None
-            trace_samples = self._sampled_trace_components(
+            (
+                real_sample,
+                imag_sample,
+                effective_synthesis_budget,
+            ) = self._sampled_trace_components(
                 braid_word,
                 circuit_level,
                 component_shots,
                 active_sampler,
                 effective_path_seed,
             )
-            real_sample, imag_sample = trace_samples
+            trace_samples = (real_sample, imag_sample)
             markov_trace = complex(
                 real_sample.expectation,
                 imag_sample.expectation,
@@ -610,13 +665,26 @@ class AJLJonesEvaluator:
                 sampler_name=sampler_name,
                 markov_trace_additive_error_bound=markov_error_bound,
                 value_additive_error_bound=abs(closure_factor) * markov_error_bound,
+                synthesis_error_budget_per_circuit=(
+                    None
+                    if circuit_level != 4
+                    else self.config.level4.synthesis_error_budget
+                ),
+                value_synthesis_error_bound=(
+                    None
+                    if circuit_level != 4
+                    else 2.0
+                    * math.sqrt(2.0)
+                    * abs(closure_factor)
+                    * effective_synthesis_budget
+                ),
                 ajl_success_probability=AJL_SUCCESS_PROBABILITY,
             )
 
         paths = closure_spec.paths(self.model)
         tasks = circuit_tasks(paths)
         if method == "statevector":
-            components = self._statevector_estimates(
+            components, effective_synthesis_budget = self._statevector_estimates(
                 braid_word,
                 tasks,
                 circuit_level,
@@ -624,7 +692,10 @@ class AJLJonesEvaluator:
         else:
             assert component_shots is not None
             assert active_sampler is not None
-            components = self._sampled_fixed_path_estimates(
+            (
+                components,
+                effective_synthesis_budget,
+            ) = self._sampled_fixed_path_estimates(
                 braid_word,
                 tasks,
                 circuit_level,
@@ -658,6 +729,10 @@ class AJLJonesEvaluator:
             estimate.real.shots + estimate.imag.shots
             for estimate in path_estimates
         )
+        closure_factor = closure_spec.normalization_factor(
+            self.model,
+            braid_word,
+        )
         return JonesEvaluation(
             model=self.model,
             word=braid_word,
@@ -682,6 +757,19 @@ class AJLJonesEvaluator:
             sampler_name=sampler_name,
             markov_trace_additive_error_bound=None,
             value_additive_error_bound=None,
+            synthesis_error_budget_per_circuit=(
+                None
+                if circuit_level != 4
+                else self.config.level4.synthesis_error_budget
+            ),
+            value_synthesis_error_bound=(
+                None
+                if circuit_level != 4
+                else 2.0
+                * math.sqrt(2.0)
+                * abs(closure_factor)
+                * effective_synthesis_budget
+            ),
             ajl_success_probability=None,
         )
 
