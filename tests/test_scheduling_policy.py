@@ -18,6 +18,8 @@ from digital_compiler import (
     Level3Policy,
     MultiplexedHeightSynthesis,
     NoAncillaMCX,
+    RecomputePrefixHeight,
+    RollingPrefixHeight,
     SerialGeneratorScheduling,
     SharedControl,
     SwitchCaseHeightSynthesis,
@@ -56,6 +58,7 @@ def parallel_config(
     mcx=None,
     max_lanes: int | None = None,
     control_distribution=None,
+    prefix_height=None,
 ) -> CompilerConfig:
     return CompilerConfig(
         height=MultiplexedHeightSynthesis() if height is None else height,
@@ -63,6 +66,9 @@ def parallel_config(
         scheduling=CommutingLayerScheduling(max_lanes=max_lanes),
         control_distribution=(
             SharedControl() if control_distribution is None else control_distribution
+        ),
+        prefix_height=(
+            RollingPrefixHeight() if prefix_height is None else prefix_height
         ),
     )
 
@@ -171,6 +177,7 @@ def test_critical_path_priority_avoids_a_greedy_extra_layer() -> None:
         CompilerConfig(
             scheduling=policy,
             control_distribution=SharedControl(),
+            prefix_height=RecomputePrefixHeight(),
         ),
     ).compile_hadamard_test(word, "101010")
     former_greedy = AJLCompiler(
@@ -178,6 +185,7 @@ def test_critical_path_priority_avoids_a_greedy_extra_layer() -> None:
         CompilerConfig(
             scheduling=StaticScheduling(((0, 1), (2,), (3,)), capacity=2),
             control_distribution=SharedControl(),
+            prefix_height=RecomputePrefixHeight(),
         ),
     ).compile_hadamard_test(word, "101010")
 
@@ -275,8 +283,15 @@ def test_parallel_mixed_sign_generators_match_dense_level_2(
 
 
 @pytest.mark.parametrize("level", [2, 3])
-def test_multiple_parallel_layers_match_dense(level: int) -> None:
-    compiler = AJLCompiler(AJLPathModel(5, 5), parallel_config(max_lanes=2))
+@pytest.mark.parametrize(
+    "prefix_height",
+    [RollingPrefixHeight(), RecomputePrefixHeight()],
+)
+def test_multiple_parallel_layers_match_dense(level: int, prefix_height) -> None:
+    compiler = AJLCompiler(
+        AJLPathModel(5, 5),
+        parallel_config(max_lanes=2, prefix_height=prefix_height),
+    )
     assert_braid_matches_dense(
         compiler,
         "1 3 2 4 1 3",
@@ -463,6 +478,7 @@ def test_parallel_policy_reduces_sigma1_sigma3_depth_and_reports_schedule() -> N
     assert parallel.level_3_single_control.depth() < serial.level_3_single_control.depth()
     assert summary["generator_scheduling"] == "commuting_layers"
     assert summary["control_distribution"] == "shared"
+    assert summary["prefix_height_strategy"] == "rolling"
     assert summary["generator_layers"] == ((1, 3),)
     assert summary["parallel_lanes"] == 2
     assert summary["active_parallel_width"] == 2

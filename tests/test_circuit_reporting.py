@@ -53,17 +53,17 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         trace.quantum_gate_count,
         trace.quantum_gate_depth,
         trace.measurement_count,
-    ) == ("trace", "10", 3, 6, 169, 128, 1)
+    ) == ("trace", "10", 3, 6, 129, 105, 1)
     assert trace.gate_families == {
-        "CNOT": 72,
+        "CNOT": 58,
         "CRz": 2,
-        "H": 10,
+        "H": 6,
         "Ry": 24,
         "Rz": 12,
-        "T/Tdg": 28,
-        "X": 21,
+        "T/Tdg": 14,
+        "X": 13,
     }
-    assert trace.exact_gate_stats["t"] == {"count": 16, "depth": 12}
+    assert trace.exact_gate_stats["t"] == {"count": 8, "depth": 6}
 
     assert (
         plat.closure,
@@ -73,10 +73,10 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         plat.quantum_gate_count,
         plat.quantum_gate_depth,
         plat.measurement_count,
-    ) == ("plat", "1010", 3, 8, 554, 412, 1)
-    assert plat.gate_families["CNOT"] == 224
-    assert plat.gate_families["T/Tdg"] == 84
-    assert plat.exact_gate_stats["rz"] == {"count": 116, "depth": 108}
+    ) == ("plat", "1010", 3, 8, 322, 247, 1)
+    assert plat.gate_families["CNOT"] == 134
+    assert plat.gate_families["T/Tdg"] == 42
+    assert plat.exact_gate_stats["rz"] == {"count": 64, "depth": 59}
 
     for report in (trace, plat):
         assert sum(report.gate_families.values()) == report.quantum_gate_count
@@ -102,7 +102,7 @@ def test_reports_select_gate_families_from_the_recorded_level() -> None:
     assert reports[0].gate_families["controlled varphi"] == 2
     assert any(name.startswith("MCX[") for name in reports[1].gate_families)
     assert any(name.startswith("MCPhase[") for name in reports[1].gate_families)
-    assert reports[2].gate_families["CNOT"] == 72
+    assert reports[2].gate_families["CNOT"] == 58
     assert "controlled varphi" not in reports[2].gate_families
 
 
@@ -146,12 +146,17 @@ def test_report_is_immutable_structured_and_has_deterministic_rich_output() -> N
     )
     assert first_dict["compiler"]["height_strategy"] == "multiplexed"
     assert first_dict["compiler"]["control_distribution"] == "shared"
+    assert first_dict["compiler"]["prefix_height_strategy"] == "rolling"
+    assert first_dict["compiler"]["prefix_height_loads"] == 1
+    assert first_dict["compiler"]["prefix_height_moves"] == 0
+    assert first_dict["compiler"]["prefix_height_unloads"] == 1
+    assert first_dict["compiler"]["prefix_height_path_steps"] == 0
     assert "not the complete closure workload" in str(report)
     assert "not a final Clifford+T estimate" in report._repr_html_()
     assert str(report) == str(report)
 
     first_dict["gates"]["families"]["CNOT"] = -1
-    assert report.gate_families["CNOT"] == 72
+    assert report.gate_families["CNOT"] == 58
     with pytest.raises(TypeError):
         report.gate_families["CNOT"] = -1
     with pytest.raises(TypeError):

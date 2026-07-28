@@ -12,7 +12,12 @@ from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 
 from .lowering import SingleControlLowerer, assert_level_2_contract
 from .model import AJLPathModel, BraidGenerator, BraidWord, HadamardPart
-from .policies import CompilerConfig, GeneratorSchedule
+from .policies import (
+    CompilerConfig,
+    GeneratorSchedule,
+    PrefixHeightPlan,
+    PrefixHeightTransition,
+)
 from .primitives import (
     QuantumAdder,
     append_hadamard_readout,
@@ -78,6 +83,10 @@ class HadamardTestCompilation:
     @property
     def scheduling_policy_label(self) -> str:
         return self.config.scheduling.name
+
+    @property
+    def prefix_height_policy_label(self) -> str:
+        return self.config.prefix_height.name
 
     @property
     def control_distribution_policy_label(self) -> str:
@@ -308,6 +317,7 @@ class AJLCompiler:
         self,
         word: BraidWord,
         schedule: GeneratorSchedule,
+        prefix_height_plan: PrefixHeightPlan,
     ) -> dict[str, object]:
         signed_layers = tuple(
             tuple(word.generators[position].signed_index for position in layer)
@@ -321,12 +331,113 @@ class AJLCompiler:
             "active_parallel_width": max((len(layer) for layer in schedule), default=0),
             "height_selector_qubits": self.height_selector_qubits,
             "workspace_qubits_per_lane": self.work_qubits_per_lane,
+            "prefix_height_strategy": self.config.prefix_height.name,
+            "prefix_height_loads": prefix_height_plan.loads,
+            "prefix_height_moves": prefix_height_plan.moves,
+            "prefix_height_unloads": prefix_height_plan.unloads,
+            "prefix_height_path_steps": prefix_height_plan.path_steps,
         }
 
     def _height_lane(self, height, lane: int) -> list:
         start = lane * self.height_selector_qubits
         stop = start + self.height_selector_qubits
         return list(height[start:stop])
+
+    def _prefix_height_plan(
+        self,
+        word: BraidWord,
+        schedule: GeneratorSchedule,
+    ) -> PrefixHeightPlan:
+        plan = self.config.prefix_height.route(
+            word,
+            schedule,
+            self.parallel_lanes,
+        )
+        self._validate_prefix_height_plan(word, schedule, plan)
+        return plan
+
+    def _validate_prefix_height_plan(
+        self,
+        word: BraidWord,
+        schedule: GeneratorSchedule,
+        plan: PrefixHeightPlan,
+    ) -> None:
+        if not isinstance(plan, PrefixHeightPlan):
+            raise ValueError("a prefix-height policy must return a PrefixHeightPlan")
+        if len(plan.layers) != len(schedule):
+            raise ValueError(
+                "a prefix-height plan must contain one route for each generator layer"
+            )
+
+        lane_state: list[int | None] = [None] * self.parallel_lanes
+
+        def apply_transition(transition: PrefixHeightTransition) -> None:
+            lane = transition.lane
+            if (
+                isinstance(lane, bool)
+                or not isinstance(lane, int)
+                or lane < 0
+                or lane >= self.parallel_lanes
+            ):
+                raise ValueError("a prefix-height transition has an invalid lane")
+            if transition.source_index != lane_state[lane]:
+                raise ValueError(
+                    "a prefix-height transition source does not match its lane state"
+                )
+            if transition.target_index is not None and (
+                transition.target_index < 1 or transition.target_index >= self.strands
+            ):
+                raise ValueError("a prefix-height transition has an invalid target")
+            if transition.source_index is None and transition.target_index is None:
+                raise ValueError("a prefix-height transition cannot be a no-op")
+            lane_state[lane] = transition.target_index
+
+        for expected_layer, routed_layer in zip(
+            schedule,
+            plan.layers,
+            strict=True,
+        ):
+            for transition in routed_layer.before:
+                apply_transition(transition)
+
+            positions = tuple(item.position for item in routed_layer.generators)
+            if positions != expected_layer:
+                raise ValueError(
+                    "a prefix-height plan must preserve each scheduled generator layer"
+                )
+            lanes = tuple(item.lane for item in routed_layer.generators)
+            if len(set(lanes)) != len(lanes):
+                raise ValueError(
+                    "a prefix-height plan cannot reuse one lane within a layer"
+                )
+            for item in routed_layer.generators:
+                if (
+                    isinstance(item.lane, bool)
+                    or not isinstance(item.lane, int)
+                    or item.lane < 0
+                    or item.lane >= self.parallel_lanes
+                ):
+                    raise ValueError("a routed generator has an invalid height lane")
+                expected_index = word.generators[item.position].index
+                if lane_state[item.lane] != expected_index:
+                    raise ValueError(
+                        "a routed generator does not have its required prefix height"
+                    )
+
+            active_lanes = set(lanes)
+            dirty_lanes = {
+                lane for lane, index in enumerate(lane_state) if index is not None
+            }
+            if dirty_lanes != active_lanes:
+                raise ValueError(
+                    "a prefix-height plan must clean every inactive lane before a layer"
+                )
+
+            for transition in routed_layer.after:
+                apply_transition(transition)
+
+        if any(index is not None for index in lane_state):
+            raise ValueError("a prefix-height plan must clean every lane at completion")
 
     def controlled_varphi_gate(
         self,
@@ -350,7 +461,29 @@ class AJLCompiler:
             self.adder.subtract_path_step(circuit, prefix_bit, height)
         self.adder.decrement(circuit, height)
 
-    def append_logical_generator(
+    def _transition_prefix_height(
+        self,
+        circuit,
+        path,
+        height,
+        source_index: int | None,
+        target_index: int | None,
+    ) -> None:
+        if source_index is None:
+            assert target_index is not None
+            self._compute_prefix_height(circuit, path, height, target_index)
+            return
+        if target_index is None:
+            self._uncompute_prefix_height(circuit, path, height, source_index)
+            return
+        if target_index > source_index:
+            for path_index in range(source_index - 1, target_index - 1):
+                self.adder.add_path_step(circuit, path[path_index], height)
+        elif target_index < source_index:
+            for path_index in range(source_index - 2, target_index - 2, -1):
+                self.adder.subtract_path_step(circuit, path[path_index], height)
+
+    def _append_height_selected_generator(
         self,
         circuit,
         path,
@@ -360,7 +493,6 @@ class AJLCompiler:
     ) -> None:
         if generator.index < 1 or generator.index >= self.strands:
             raise ValueError(f"generator index must be in 1..{self.strands - 1}")
-        self._compute_prefix_height(circuit, path, height, generator.index)
         extra_controls = () if experiment_control is None else (experiment_control,)
         self.config.height.append_braid(
             circuit,
@@ -372,52 +504,45 @@ class AJLCompiler:
             self.projector_alignment_angles,
             extra_controls=extra_controls,
         )
-        self._uncompute_prefix_height(circuit, path, height, generator.index)
 
-    def append_logical_layer(
+    def _append_logical_plan(
         self,
         circuit,
         path,
         height,
         word: BraidWord,
-        layer: tuple[int, ...],
+        plan: PrefixHeightPlan,
         lane_controls=(),
     ) -> None:
         controls = list(lane_controls)
-        for lane, position in enumerate(layer):
-            generator = word.generators[position]
-            self._compute_prefix_height(
-                circuit,
-                path,
-                self._height_lane(height, lane),
-                generator.index,
-            )
+        for layer in plan.layers:
+            for transition in layer.before:
+                self._transition_prefix_height(
+                    circuit,
+                    path,
+                    self._height_lane(height, transition.lane),
+                    transition.source_index,
+                    transition.target_index,
+                )
 
-        for lane, position in enumerate(layer):
-            generator = word.generators[position]
-            experiment_control = None if not controls else controls[lane]
-            extra_controls = (
-                () if experiment_control is None else (experiment_control,)
-            )
-            self.config.height.append_braid(
-                circuit,
-                self.model,
-                path,
-                self._height_lane(height, lane),
-                generator.index,
-                generator.sign,
-                self.projector_alignment_angles,
-                extra_controls=extra_controls,
-            )
+            for item in layer.generators:
+                experiment_control = None if not controls else controls[item.lane]
+                self._append_height_selected_generator(
+                    circuit,
+                    path,
+                    self._height_lane(height, item.lane),
+                    word.generators[item.position],
+                    experiment_control,
+                )
 
-        for lane, position in reversed(tuple(enumerate(layer))):
-            generator = word.generators[position]
-            self._uncompute_prefix_height(
-                circuit,
-                path,
-                self._height_lane(height, lane),
-                generator.index,
-            )
+            for transition in layer.after:
+                self._transition_prefix_height(
+                    circuit,
+                    path,
+                    self._height_lane(height, transition.lane),
+                    transition.source_index,
+                    transition.target_index,
+                )
 
     def lower_to_level_3(self, level_2_circuit: QuantumCircuit) -> QuantumCircuit:
         return self.lowerer.lower(level_2_circuit)
@@ -428,6 +553,7 @@ class AJLCompiler:
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
         schedule = self._schedule(braid_word)
+        prefix_height_plan = self._prefix_height_plan(braid_word, schedule)
         policy_name = self.config.height.name
         circuit, _, path, height, _, _ = self._new_braid_circuit(
             f"level_2_braid_{policy_name}({braid_word})",
@@ -438,10 +564,19 @@ class AJLCompiler:
             "height_strategy": policy_name,
             "gate_contract": "ajl_multicontrolled",
             "compiler_config": self._config_metadata(),
-            **self._schedule_metadata(braid_word, schedule),
+            **self._schedule_metadata(
+                braid_word,
+                schedule,
+                prefix_height_plan,
+            ),
         }
-        for layer in schedule:
-            self.append_logical_layer(circuit, path, height, braid_word, layer)
+        self._append_logical_plan(
+            circuit,
+            path,
+            height,
+            braid_word,
+            prefix_height_plan,
+        )
         assert_level_2_contract(circuit)
         return circuit
 
@@ -451,6 +586,7 @@ class AJLCompiler:
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
         schedule = self._schedule(braid_word)
+        prefix_height_plan = self._prefix_height_plan(braid_word, schedule)
         policy_name = self.config.height.name
         circuit, control, path, height, _, control_fanout = self._new_braid_circuit(
             f"controlled_level_2_braid_{policy_name}({braid_word})",
@@ -461,7 +597,11 @@ class AJLCompiler:
             "height_strategy": policy_name,
             "gate_contract": "ajl_multicontrolled",
             "compiler_config": self._config_metadata(),
-            **self._schedule_metadata(braid_word, schedule),
+            **self._schedule_metadata(
+                braid_word,
+                schedule,
+                prefix_height_plan,
+            ),
         }
         active_width = max((len(layer) for layer in schedule), default=0)
         lane_controls = self.config.control_distribution.prepare(
@@ -470,10 +610,14 @@ class AJLCompiler:
             control_fanout,
             active_width,
         )
-        for layer in schedule:
-            self.append_logical_layer(
-                circuit, path, height, braid_word, layer, lane_controls
-            )
+        self._append_logical_plan(
+            circuit,
+            path,
+            height,
+            braid_word,
+            prefix_height_plan,
+            lane_controls,
+        )
         self.config.control_distribution.unprepare(
             circuit,
             control[0],
@@ -514,6 +658,7 @@ class AJLCompiler:
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
         schedule = self._schedule(braid_word)
+        prefix_height_plan = self._prefix_height_plan(braid_word, schedule)
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
         (
@@ -529,7 +674,11 @@ class AJLCompiler:
             "compiler_level": 1,
             "gate_contract": "ajl_varphi_blocks",
             "compiler_config": self._config_metadata(),
-            **self._schedule_metadata(braid_word, schedule),
+            **self._schedule_metadata(
+                braid_word,
+                schedule,
+                prefix_height_plan,
+            ),
         }
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
@@ -555,6 +704,7 @@ class AJLCompiler:
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
         schedule = self._schedule(braid_word)
+        prefix_height_plan = self._prefix_height_plan(braid_word, schedule)
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
         policy_name = self.config.height.name
@@ -572,7 +722,11 @@ class AJLCompiler:
             "height_strategy": policy_name,
             "gate_contract": "ajl_multicontrolled",
             "compiler_config": self._config_metadata(),
-            **self._schedule_metadata(braid_word, schedule),
+            **self._schedule_metadata(
+                braid_word,
+                schedule,
+                prefix_height_plan,
+            ),
         }
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
@@ -583,10 +737,14 @@ class AJLCompiler:
             control_fanout,
             active_width,
         )
-        for layer in schedule:
-            self.append_logical_layer(
-                circuit, path, height, braid_word, layer, lane_controls
-            )
+        self._append_logical_plan(
+            circuit,
+            path,
+            height,
+            braid_word,
+            prefix_height_plan,
+            lane_controls,
+        )
         self.config.control_distribution.unprepare(
             circuit,
             control[0],

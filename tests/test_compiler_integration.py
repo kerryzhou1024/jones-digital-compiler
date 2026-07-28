@@ -16,6 +16,7 @@ from digital_compiler import (
     DenseAJLReference,
     Level3Policy,
     MultiplexedHeightSynthesis,
+    RecomputePrefixHeight,
     SwitchCaseHeightSynthesis,
     circuit_gate_count_depth,
     compilation_summary,
@@ -298,23 +299,23 @@ def test_default_k5_resources_and_metadata_regression() -> None:
     assert compiler.work_qubits == 0
     assert compiler.logical_qubits == 6
     assert dict(compilation.level_2_multicontrolled.count_ops()) == {
-        "cx": 40,
+        "cx": 38,
         "ry": 24,
-        "x": 21,
-        "ccx": 4,
+        "x": 13,
         "h": 2,
+        "ccx": 2,
         "p": 2,
         "mcphase": 2,
         "measure": 1,
     }
     assert dict(compilation.level_3_single_control.count_ops()) == {
-        "cx": 72,
+        "cx": 58,
         "ry": 24,
-        "x": 21,
-        "t": 16,
-        "tdg": 12,
+        "x": 13,
         "rz": 12,
-        "h": 10,
+        "t": 8,
+        "tdg": 6,
+        "h": 6,
         "crz": 2,
         "measure": 1,
     }
@@ -329,9 +330,25 @@ def test_default_k5_resources_and_metadata_regression() -> None:
         "multi_controlled_phase": "recursive_corrected_rz",
     }
     assert summary["logical_qubits_each_level"] == 6
+    assert summary["prefix_height_strategy"] == "rolling"
+    assert summary["prefix_height_loads"] == 1
+    assert summary["prefix_height_moves"] == 0
+    assert summary["prefix_height_unloads"] == 1
+    assert summary["prefix_height_path_steps"] == 0
     assert summary["level_1_gate_count_depth"]["total"]["count"] == 5
-    assert summary["level_2_gate_count_depth"]["total"]["count"] == 95
-    assert summary["level_3_gate_count_depth"]["total"]["count"] == 169
+    assert summary["level_2_gate_count_depth"]["total"]["count"] == 83
+    assert summary["level_3_gate_count_depth"]["total"]["count"] == 129
+
+    baseline = AJLCompiler(
+        AJLPathModel(2, 5),
+        CompilerConfig(prefix_height=RecomputePrefixHeight()),
+    ).compile_hadamard_test("s1^2", "10")
+    baseline_summary = compilation_summary(baseline)
+    assert sum(baseline.level_2_multicontrolled.count_ops().values()) == 96
+    assert sum(baseline.level_3_single_control.count_ops().values()) == 170
+    assert baseline_summary["prefix_height_strategy"] == "recompute"
+    assert baseline_summary["level_2_gate_count_depth"]["total"]["count"] == 95
+    assert baseline_summary["level_3_gate_count_depth"]["total"]["count"] == 169
 
 
 def test_printed_compilation_summary_has_one_clear_table_per_level(capsys) -> None:

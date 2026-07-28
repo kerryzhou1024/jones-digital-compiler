@@ -184,6 +184,17 @@ phase decomposition and Gray-code multiplexed rotations. Use
 `Level3Policy(mcx=CleanAncillaMCX())` to opt into the clean-ancilla Toffoli
 ladder.
 
+Prefix heights use rolling routing by default. A live height selector moves
+between consecutive generator indices using only the intervening path steps.
+Use the former compute/apply/uncompute behavior as an explicit resource
+baseline:
+
+```python
+from digital_compiler import CompilerConfig, RecomputePrefixHeight
+
+baseline = CompilerConfig(prefix_height=RecomputePrefixHeight())
+```
+
 ## Parallel Generator Scheduling
 
 Scheduling is independently hot-swappable. The default
@@ -217,7 +228,9 @@ share one experiment control by default, so no control ancillas are required.
 Use `TreeControlFanout` to trade one clean ancilla per additional lane for
 disjoint controls prepared by a logarithmic-depth CNOT tree. Clean-ancilla MCX
 workspace remains partitioned by lane. Registers are reused between layers and
-are uncomputed after use.
+are uncomputed after use. Rolling prefix-height routing matches live selectors
+to the next layer by minimum movement distance, cleans unmatched lanes before
+the next layer, and cleans every lane after the final layer.
 
 Only generators satisfying `abs(i - j) >= 2` can share a layer, and the
 compiler validates that a custom scheduling policy neither loses generators

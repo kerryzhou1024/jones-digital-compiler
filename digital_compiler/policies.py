@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import operator
 from dataclasses import dataclass, field
+from functools import cache
 from heapq import heapify, heappop, heappush
 from typing import Protocol
 
@@ -23,6 +24,331 @@ from .primitives import (
 )
 
 GeneratorSchedule = tuple[tuple[int, ...], ...]
+
+
+@dataclass(frozen=True)
+class PrefixHeightTransition:
+    """One clean/load, live/move, or live/unload height-lane transition."""
+
+    lane: int
+    source_index: int | None
+    target_index: int | None
+
+    @property
+    def path_steps(self) -> int:
+        if self.source_index is None:
+            return 0 if self.target_index is None else self.target_index - 1
+        if self.target_index is None:
+            return self.source_index - 1
+        return abs(self.target_index - self.source_index)
+
+
+@dataclass(frozen=True)
+class RoutedGenerator:
+    """One scheduled braid-word position assigned to a physical height lane."""
+
+    position: int
+    lane: int
+
+
+@dataclass(frozen=True)
+class PrefixHeightLayerPlan:
+    """Height transitions and generator assignments for one scheduled layer."""
+
+    before: tuple[PrefixHeightTransition, ...]
+    generators: tuple[RoutedGenerator, ...]
+    after: tuple[PrefixHeightTransition, ...] = ()
+
+
+@dataclass(frozen=True)
+class PrefixHeightPlan:
+    """Immutable prefix-height route for a complete scheduled braid word."""
+
+    layers: tuple[PrefixHeightLayerPlan, ...]
+
+    @property
+    def transitions(self) -> tuple[PrefixHeightTransition, ...]:
+        return tuple(
+            transition
+            for layer in self.layers
+            for transition in (*layer.before, *layer.after)
+        )
+
+    @property
+    def loads(self) -> int:
+        return sum(
+            transition.source_index is None and transition.target_index is not None
+            for transition in self.transitions
+        )
+
+    @property
+    def moves(self) -> int:
+        return sum(
+            transition.source_index is not None and transition.target_index is not None
+            for transition in self.transitions
+        )
+
+    @property
+    def unloads(self) -> int:
+        return sum(
+            transition.source_index is not None and transition.target_index is None
+            for transition in self.transitions
+        )
+
+    @property
+    def path_steps(self) -> int:
+        return sum(transition.path_steps for transition in self.transitions)
+
+
+class PrefixHeightPolicy(Protocol):
+    """Strategy for routing prefix heights through scheduled generator layers."""
+
+    name: str
+
+    def route(
+        self,
+        word: BraidWord,
+        schedule: GeneratorSchedule,
+        lane_capacity: int,
+    ) -> PrefixHeightPlan: ...
+
+    def metadata(self) -> dict[str, object]: ...
+
+
+@dataclass(frozen=True)
+class RecomputePrefixHeight:
+    """Compute and erase every scheduled generator's prefix height."""
+
+    name: str = "recompute"
+
+    def route(
+        self,
+        word: BraidWord,
+        schedule: GeneratorSchedule,
+        lane_capacity: int,
+    ) -> PrefixHeightPlan:
+        del lane_capacity
+        layers = []
+        for layer in schedule:
+            routed = tuple(
+                RoutedGenerator(position=position, lane=lane)
+                for lane, position in enumerate(layer)
+            )
+            loads = tuple(
+                PrefixHeightTransition(
+                    lane=item.lane,
+                    source_index=None,
+                    target_index=word.generators[item.position].index,
+                )
+                for item in routed
+            )
+            unloads = tuple(
+                PrefixHeightTransition(
+                    lane=item.lane,
+                    source_index=word.generators[item.position].index,
+                    target_index=None,
+                )
+                for item in reversed(routed)
+            )
+            layers.append(
+                PrefixHeightLayerPlan(
+                    before=loads,
+                    generators=routed,
+                    after=unloads,
+                )
+            )
+        return PrefixHeightPlan(tuple(layers))
+
+    def metadata(self) -> dict[str, object]:
+        return {"name": self.name}
+
+
+@dataclass(frozen=True)
+class _RoutingChoice:
+    path_steps: int
+    base_updates: int
+    matches: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class RollingPrefixHeight:
+    """Retain height lanes and move them between nearby generator indices."""
+
+    name: str = "rolling"
+
+    @staticmethod
+    def _match_existing_lanes(
+        previous: tuple[tuple[int, int], ...],
+        targets: tuple[tuple[int, int], ...],
+    ) -> tuple[tuple[int, int], ...]:
+        @cache
+        def best(
+            previous_offset: int,
+            target_offset: int,
+        ) -> _RoutingChoice:
+            if previous_offset == len(previous) and target_offset == len(targets):
+                return _RoutingChoice(0, 0, ())
+
+            candidates = []
+            if previous_offset < len(previous) and target_offset < len(targets):
+                suffix = best(previous_offset + 1, target_offset + 1)
+                candidates.append(
+                    _RoutingChoice(
+                        path_steps=(
+                            abs(
+                                previous[previous_offset][0] - targets[target_offset][0]
+                            )
+                            + suffix.path_steps
+                        ),
+                        base_updates=suffix.base_updates,
+                        matches=(
+                            (previous_offset, target_offset),
+                            *suffix.matches,
+                        ),
+                    )
+                )
+            if previous_offset < len(previous):
+                suffix = best(previous_offset + 1, target_offset)
+                candidates.append(
+                    _RoutingChoice(
+                        path_steps=(
+                            previous[previous_offset][0] - 1 + suffix.path_steps
+                        ),
+                        base_updates=1 + suffix.base_updates,
+                        matches=suffix.matches,
+                    )
+                )
+            if target_offset < len(targets):
+                suffix = best(previous_offset, target_offset + 1)
+                candidates.append(
+                    _RoutingChoice(
+                        path_steps=targets[target_offset][0] - 1 + suffix.path_steps,
+                        base_updates=1 + suffix.base_updates,
+                        matches=suffix.matches,
+                    )
+                )
+
+            def choice_key(choice: _RoutingChoice):
+                matched_lanes_and_positions = tuple(
+                    sorted(
+                        (
+                            previous[old_offset][1],
+                            targets[new_offset][1],
+                        )
+                        for old_offset, new_offset in choice.matches
+                    )
+                )
+                return (
+                    choice.path_steps,
+                    choice.base_updates,
+                    matched_lanes_and_positions,
+                )
+
+            return min(candidates, key=choice_key)
+
+        choice = best(0, 0)
+        return tuple(
+            (
+                previous[previous_offset][1],
+                targets[target_offset][1],
+            )
+            for previous_offset, target_offset in choice.matches
+        )
+
+    def route(
+        self,
+        word: BraidWord,
+        schedule: GeneratorSchedule,
+        lane_capacity: int,
+    ) -> PrefixHeightPlan:
+        current: dict[int, int] = {}
+        layers = []
+
+        for layer in schedule:
+            targets = tuple(
+                sorted(
+                    (
+                        word.generators[position].index,
+                        position,
+                    )
+                    for position in layer
+                )
+            )
+            previous = tuple(sorted((index, lane) for lane, index in current.items()))
+            matches = self._match_existing_lanes(previous, targets)
+            matched_lanes = {lane for lane, _ in matches}
+            matched_positions = {position for _, position in matches}
+
+            assignment = {position: lane for lane, position in matches}
+            available_lanes = (
+                lane for lane in range(lane_capacity) if lane not in matched_lanes
+            )
+            for position in sorted(
+                position for _, position in targets if position not in matched_positions
+            ):
+                assignment[position] = next(available_lanes)
+
+            unloads = tuple(
+                PrefixHeightTransition(
+                    lane=lane,
+                    source_index=current[lane],
+                    target_index=None,
+                )
+                for lane in sorted(current)
+                if lane not in matched_lanes
+            )
+            moves = tuple(
+                PrefixHeightTransition(
+                    lane=lane,
+                    source_index=current[lane],
+                    target_index=word.generators[position].index,
+                )
+                for lane, position in sorted(matches)
+                if current[lane] != word.generators[position].index
+            )
+            loads = tuple(
+                PrefixHeightTransition(
+                    lane=assignment[position],
+                    source_index=None,
+                    target_index=word.generators[position].index,
+                )
+                for position in sorted(assignment)
+                if assignment[position] not in matched_lanes
+            )
+            routed = tuple(
+                RoutedGenerator(position=position, lane=assignment[position])
+                for position in layer
+            )
+            layers.append(
+                PrefixHeightLayerPlan(
+                    before=(*unloads, *moves, *loads),
+                    generators=routed,
+                )
+            )
+            current = {
+                assignment[position]: word.generators[position].index
+                for position in layer
+            }
+
+        if layers:
+            last = layers[-1]
+            layers[-1] = PrefixHeightLayerPlan(
+                before=last.before,
+                generators=last.generators,
+                after=tuple(
+                    PrefixHeightTransition(
+                        lane=lane,
+                        source_index=current[lane],
+                        target_index=None,
+                    )
+                    for lane in sorted(current, reverse=True)
+                ),
+            )
+
+        return PrefixHeightPlan(tuple(layers))
+
+    def metadata(self) -> dict[str, object]:
+        return {"name": self.name}
 
 
 class GeneratorSchedulingPolicy(Protocol):
@@ -624,6 +950,7 @@ class CompilerConfig:
     control_distribution: ControlDistributionPolicy = field(
         default_factory=SharedControl
     )
+    prefix_height: PrefixHeightPolicy = field(default_factory=RollingPrefixHeight)
 
     def metadata(self) -> dict[str, object]:
         return {
@@ -631,4 +958,5 @@ class CompilerConfig:
             "level_3": self.level3.metadata(),
             "generator_scheduling": self.scheduling.metadata(),
             "control_distribution": self.control_distribution.metadata(),
+            "prefix_height": self.prefix_height.metadata(),
         }
