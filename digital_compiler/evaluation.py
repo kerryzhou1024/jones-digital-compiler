@@ -7,6 +7,7 @@ import operator
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from numbers import Real
 from types import MappingProxyType
 from typing import Literal
 
@@ -549,6 +550,8 @@ class AJLJonesEvaluator:
         method: EvaluationMethod = "statevector",
         circuit_level: EvaluationCircuitLevel = 3,
         shots: int | None = None,
+        target_additive_error: float | None = None,
+        success_probability: float | None = None,
         seed: int | None = None,
         path_seed: int | None = None,
         sampler: BaseSamplerV2 | None = None,
@@ -571,11 +574,24 @@ class AJLJonesEvaluator:
             plat_writhe,
             writhe_name="plat_writhe",
         )
+        closure_factor = closure_spec.normalization_factor(
+            self.model,
+            braid_word,
+        )
         sampler_name = None
+        effective_success_probability = None
 
         if method == "statevector":
             if shots is not None:
                 raise ValueError("shots can only be specified when method='shots'")
+            if target_additive_error is not None:
+                raise ValueError(
+                    "target_additive_error can only be specified when method='shots'"
+                )
+            if success_probability is not None:
+                raise ValueError(
+                    "success_probability can only be specified when method='shots'"
+                )
             if seed is not None:
                 raise ValueError("seed can only be specified when method='shots'")
             if path_seed is not None:
@@ -587,9 +603,23 @@ class AJLJonesEvaluator:
             component_shots = None
             active_sampler = None
         else:
-            component_shots = _positive_shots(
-                DEFAULT_SHOTS if shots is None else shots
+            if shots is not None and target_additive_error is not None:
+                raise ValueError(
+                    "shots and target_additive_error are mutually exclusive"
+                )
+            effective_success_probability = _success_probability(
+                success_probability
             )
+            if target_additive_error is None:
+                component_shots = _positive_shots(
+                    DEFAULT_SHOTS if shots is None else shots
+                )
+            else:
+                component_shots = _shots_for_additive_error(
+                    target_additive_error,
+                    closure_factor=closure_factor,
+                    success_probability=effective_success_probability,
+                )
             if closure_spec.kind == "plat" and path_seed is not None:
                 raise ValueError(
                     "path_seed can only be specified for shot-based trace evaluation"
@@ -629,10 +659,6 @@ class AJLJonesEvaluator:
                 real_sample.expectation,
                 imag_sample.expectation,
             )
-            closure_factor = closure_spec.normalization_factor(
-                self.model,
-                braid_word,
-            )
             value = complex(closure_factor * markov_trace)
             real_error, imag_error = self._propagate_component_standard_errors(
                 braid_word,
@@ -640,8 +666,10 @@ class AJLJonesEvaluator:
                 real_sample.standard_error,
                 imag_sample.standard_error,
             )
-            markov_error_bound = math.sqrt(
-                32.0 * math.log(2.0) / component_shots
+            assert effective_success_probability is not None
+            markov_error_bound = _complex_additive_error_bound(
+                component_shots,
+                effective_success_probability,
             )
             return JonesEvaluation(
                 model=self.model,
@@ -678,7 +706,7 @@ class AJLJonesEvaluator:
                     * abs(closure_factor)
                     * effective_synthesis_budget
                 ),
-                ajl_success_probability=AJL_SUCCESS_PROBABILITY,
+                ajl_success_probability=effective_success_probability,
             )
 
         paths = closure_spec.paths(self.model)
@@ -729,10 +757,15 @@ class AJLJonesEvaluator:
             estimate.real.shots + estimate.imag.shots
             for estimate in path_estimates
         )
-        closure_factor = closure_spec.normalization_factor(
-            self.model,
-            braid_word,
-        )
+        value_additive_error_bound = None
+        if component_shots is not None:
+            assert effective_success_probability is not None
+            value_additive_error_bound = abs(
+                closure_factor
+            ) * _complex_additive_error_bound(
+                component_shots,
+                effective_success_probability,
+            )
         return JonesEvaluation(
             model=self.model,
             word=braid_word,
@@ -756,7 +789,7 @@ class AJLJonesEvaluator:
             total_shots=total_shots,
             sampler_name=sampler_name,
             markov_trace_additive_error_bound=None,
-            value_additive_error_bound=None,
+            value_additive_error_bound=value_additive_error_bound,
             synthesis_error_budget_per_circuit=(
                 None
                 if circuit_level != 4
@@ -770,7 +803,7 @@ class AJLJonesEvaluator:
                 * abs(closure_factor)
                 * effective_synthesis_budget
             ),
-            ajl_success_probability=None,
+            ajl_success_probability=effective_success_probability,
         )
 
     def _propagate_standard_errors(
@@ -821,6 +854,63 @@ def _positive_shots(value: object) -> int:
     return shots
 
 
+def _success_probability(value: object | None) -> float:
+    if value is None:
+        return AJL_SUCCESS_PROBABILITY
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError("success_probability must be a finite number between 0 and 1")
+    probability = float(value)
+    if not math.isfinite(probability) or not 0.0 < probability < 1.0:
+        raise ValueError("success_probability must be a finite number between 0 and 1")
+    return probability
+
+
+def _confidence_log_factor(success_probability: float) -> float:
+    return math.log(4.0) - math.log1p(-success_probability)
+
+
+def _complex_additive_error_bound(
+    shots: int,
+    success_probability: float,
+) -> float:
+    return math.sqrt(
+        4.0 * _confidence_log_factor(success_probability) / shots
+    )
+
+
+def _shots_for_additive_error(
+    target_additive_error: object,
+    *,
+    closure_factor: complex,
+    success_probability: float,
+) -> int:
+    if isinstance(target_additive_error, bool) or not isinstance(
+        target_additive_error,
+        Real,
+    ):
+        raise ValueError("target_additive_error must be a finite positive number")
+    target = float(target_additive_error)
+    if not math.isfinite(target) or target <= 0.0:
+        raise ValueError("target_additive_error must be a finite positive number")
+
+    try:
+        required_shots = (
+            4.0
+            * abs(closure_factor) ** 2
+            * _confidence_log_factor(success_probability)
+            / target**2
+        )
+    except (OverflowError, ZeroDivisionError):
+        raise ValueError(
+            "target_additive_error requires an unrepresentable shot count"
+        ) from None
+    if not math.isfinite(required_shots):
+        raise ValueError(
+            "target_additive_error requires an unrepresentable shot count"
+        )
+    return max(1, math.ceil(required_shots))
+
+
 def _nonnegative_path_seed(value: object) -> int | None:
     if value is None:
         return None
@@ -845,6 +935,8 @@ def evaluate_jones(
     method: EvaluationMethod = "statevector",
     circuit_level: EvaluationCircuitLevel = 3,
     shots: int | None = None,
+    target_additive_error: float | None = None,
+    success_probability: float | None = None,
     seed: int | None = None,
     path_seed: int | None = None,
     config: CompilerConfig | None = None,
@@ -870,6 +962,8 @@ def evaluate_jones(
         method=method,
         circuit_level=circuit_level,
         shots=shots,
+        target_additive_error=target_additive_error,
+        success_probability=success_probability,
         seed=seed,
         path_seed=path_seed,
         sampler=sampler,

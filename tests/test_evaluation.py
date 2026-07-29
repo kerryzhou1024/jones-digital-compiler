@@ -185,12 +185,21 @@ def test_exact_level_4_evaluation_reports_zero_synthesis_bound() -> None:
 
 def test_level_4_trace_shots_preserve_batching_and_sampling() -> None:
     sampler = RecordingSampler(seed=29)
+    target_additive_error = 1.0
+    confidence_factor = math.log(4.0) - math.log1p(-AJL_SUCCESS_PROBABILITY)
+    closure_magnitude = AJLPathModel(2, 5).d
+    expected_shots = math.ceil(
+        4.0
+        * closure_magnitude**2
+        * confidence_factor
+        / target_additive_error**2
+    )
     result = evaluate_jones(
         "s1^2",
         strands=2,
         method="shots",
         circuit_level=4,
-        shots=64,
+        target_additive_error=target_additive_error,
         path_seed=13,
         sampler=sampler,
         config=CompilerConfig(level4=CliffordTConfig(1e-3)),
@@ -198,9 +207,13 @@ def test_level_4_trace_shots_preserve_batching_and_sampling() -> None:
 
     assert len(sampler.calls) == 1
     assert sampler.calls[0][0] == result.circuit_count
-    assert sum(shot for shot in sampler.calls[0][2] if shot is not None) == 128
-    assert result.total_shots == 128
+    assert (
+        sum(shot for shot in sampler.calls[0][2] if shot is not None)
+        == 2 * expected_shots
+    )
+    assert result.total_shots == 2 * expected_shots
     assert result.trace_samples is not None
+    assert result.value_additive_error_bound <= target_additive_error
     assert result.value_synthesis_error_bound is not None
     assert all(
         sample.circuit_count < sample.shots
@@ -269,7 +282,7 @@ def test_seeded_shot_evaluation_is_reproducible_and_reports_cost() -> None:
     assert first.circuit_count == 4
     assert first.total_shots == 20_000
     assert first.ajl_success_probability == AJL_SUCCESS_PROBABILITY
-    expected_markov_bound = math.sqrt(32.0 * math.log(2.0) / 10_000)
+    expected_markov_bound = math.sqrt(16.0 * math.log(2.0) / 10_000)
     assert first.markov_trace_additive_error_bound == pytest.approx(
         expected_markov_bound
     )
@@ -292,6 +305,60 @@ def test_seeded_shot_evaluation_is_reproducible_and_reports_cost() -> None:
             sample.path_counts[(1, 0)] = 0
     with pytest.raises(FrozenInstanceError):
         first.value = 0j
+
+
+def test_explicit_shots_report_the_bound_at_requested_confidence() -> None:
+    shots = 512
+    success_probability = 0.99
+    result = evaluate_jones(
+        "s1^2",
+        strands=2,
+        method="shots",
+        circuit_level=2,
+        shots=shots,
+        success_probability=success_probability,
+        seed=47,
+    )
+    confidence_factor = math.log(4.0) - math.log1p(-success_probability)
+    expected_markov_bound = math.sqrt(4.0 * confidence_factor / shots)
+
+    assert result.ajl_success_probability == success_probability
+    assert result.markov_trace_additive_error_bound == pytest.approx(
+        expected_markov_bound
+    )
+    assert result.value_additive_error_bound == pytest.approx(
+        result.model.d * expected_markov_bound
+    )
+
+
+def test_trace_target_additive_error_selects_minimal_shots() -> None:
+    target_additive_error = 1.5
+    success_probability = 0.9
+    model = AJLPathModel(2, 5)
+    closure_magnitude = model.d
+    confidence_factor = math.log(4.0) - math.log1p(-success_probability)
+    expected_shots = math.ceil(
+        4.0
+        * closure_magnitude**2
+        * confidence_factor
+        / target_additive_error**2
+    )
+    result = AJLJonesEvaluator(model).evaluate(
+        "s1^2",
+        method="shots",
+        circuit_level=2,
+        target_additive_error=target_additive_error,
+        success_probability=success_probability,
+        path_seed=59,
+        sampler=RecordingSampler(seed=61),
+    )
+
+    assert result.shots_per_component == expected_shots
+    assert result.total_shots == 2 * expected_shots
+    assert result.value_additive_error_bound <= target_additive_error
+    assert closure_magnitude * math.sqrt(
+        4.0 * confidence_factor / (expected_shots - 1)
+    ) > target_additive_error
 
 
 def test_shot_uncertainties_are_propagated_to_jones_components() -> None:
@@ -438,6 +505,44 @@ def test_sampled_plat_is_reproducible_and_propagates_its_normalization() -> None
     assert first.total_shots == 4096
     assert first.real_standard_error == pytest.approx(expected_real_error)
     assert first.imag_standard_error == pytest.approx(expected_imag_error)
+    expected_value_bound = abs(factor) * math.sqrt(
+        16.0 * math.log(2.0) / 2048
+    )
+    assert first.markov_trace_additive_error_bound is None
+    assert first.value_additive_error_bound == pytest.approx(
+        expected_value_bound
+    )
+    assert first.ajl_success_probability == AJL_SUCCESS_PROBABILITY
+
+
+def test_plat_target_additive_error_selects_minimal_shots() -> None:
+    target_additive_error = 1.0
+    success_probability = 0.75
+    confidence_factor = math.log(4.0) - math.log1p(-success_probability)
+    expected_shots = math.ceil(
+        4.0 * confidence_factor / target_additive_error**2
+    )
+    result = evaluate_jones(
+        "s1",
+        strands=2,
+        closure="plat",
+        plat_writhe=-1,
+        method="shots",
+        circuit_level=2,
+        target_additive_error=target_additive_error,
+        success_probability=success_probability,
+        seed=67,
+    )
+
+    assert result.shots_per_circuit == expected_shots
+    assert result.shots_per_component == expected_shots
+    assert result.total_shots == 2 * expected_shots
+    assert result.markov_trace_additive_error_bound is None
+    assert result.value_additive_error_bound <= target_additive_error
+    assert math.sqrt(
+        4.0 * confidence_factor / (expected_shots - 1)
+    ) > target_additive_error
+    assert result.ajl_success_probability == success_probability
 
 
 def test_custom_sampler_batches_only_two_plat_circuits() -> None:
@@ -468,6 +573,10 @@ def test_shot_mode_uses_documented_default() -> None:
     assert result.shots_per_circuit is None
     assert result.shots_per_component == DEFAULT_SHOTS
     assert result.total_shots == 2 * DEFAULT_SHOTS
+    assert result.ajl_success_probability == AJL_SUCCESS_PROBABILITY
+    assert result.markov_trace_additive_error_bound == pytest.approx(
+        math.sqrt(16.0 * math.log(2.0) / DEFAULT_SHOTS)
+    )
 
 
 @pytest.mark.parametrize(
@@ -489,6 +598,68 @@ def test_shot_mode_uses_documented_default() -> None:
         ({"method": "shots", "shots": 0}, "shots must be"),
         ({"method": "shots", "shots": 1.5}, "shots must be"),
         ({"shots": 10}, "shots can only"),
+        ({"target_additive_error": 1.0}, "target_additive_error can only"),
+        ({"success_probability": 0.9}, "success_probability can only"),
+        (
+            {
+                "method": "shots",
+                "shots": 10,
+                "target_additive_error": 1.0,
+            },
+            "mutually exclusive",
+        ),
+        (
+            {"method": "shots", "target_additive_error": 0.0},
+            "target_additive_error must be",
+        ),
+        (
+            {"method": "shots", "target_additive_error": -1.0},
+            "target_additive_error must be",
+        ),
+        (
+            {"method": "shots", "target_additive_error": float("nan")},
+            "target_additive_error must be",
+        ),
+        (
+            {"method": "shots", "target_additive_error": float("inf")},
+            "target_additive_error must be",
+        ),
+        (
+            {"method": "shots", "target_additive_error": True},
+            "target_additive_error must be",
+        ),
+        (
+            {"method": "shots", "target_additive_error": "1.0"},
+            "target_additive_error must be",
+        ),
+        (
+            {"method": "shots", "target_additive_error": 1e-300},
+            "unrepresentable shot count",
+        ),
+        (
+            {"method": "shots", "success_probability": 0.0},
+            "success_probability must be",
+        ),
+        (
+            {"method": "shots", "success_probability": 1.0},
+            "success_probability must be",
+        ),
+        (
+            {"method": "shots", "success_probability": float("nan")},
+            "success_probability must be",
+        ),
+        (
+            {"method": "shots", "success_probability": float("inf")},
+            "success_probability must be",
+        ),
+        (
+            {"method": "shots", "success_probability": True},
+            "success_probability must be",
+        ),
+        (
+            {"method": "shots", "success_probability": "0.9"},
+            "success_probability must be",
+        ),
         ({"seed": 4}, "seed can only"),
         ({"path_seed": 4}, "path_seed can only"),
         ({"sampler": RecordingSampler()}, "sampler can only"),

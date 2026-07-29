@@ -197,6 +197,7 @@ AJL endpoint-weighted path sampling instead:
 sampled = problem.evaluate(
     method="shots",
     shots=10_000,
+    success_probability=0.99,
     seed=7,
 )
 
@@ -207,12 +208,50 @@ print(sampled.trace_samples)
 print(sampled.value_additive_error_bound)
 ```
 
+Alternatively, request an absolute additive error on the returned Jones value
+and let the evaluator choose the shots:
+
+```python
+error_driven = problem.evaluate(
+    method="shots",
+    target_additive_error=0.1,
+    success_probability=0.99,
+    seed=7,
+)
+
+print(error_driven.shots_per_component)
+print(error_driven.total_shots)  # twice shots_per_component
+print(error_driven.value_additive_error_bound)  # <= 0.1
+```
+
 Duplicate sampled paths are grouped into variable-shot Qiskit jobs.
 `circuit_count` is the number of unique path/component circuits, while
-`total_shots` is always twice `shots` for a complex trace estimate. A sampled
-trace does not build a complete amplitude table, so its `path_estimates` and
-`path_amplitudes` are `None`. Pass `path_seed` to control path selection
-independently when supplying a custom sampler.
+`total_shots` is always twice `shots_per_component` for a complex estimate. A
+sampled trace does not build a complete amplitude table, so its `path_estimates`
+and `path_amplitudes` are `None`. Pass `path_seed` to control path selection
+independently when supplying a custom sampler. Target-error selection and
+reported additive bounds also apply to shot-based plat evaluation.
+
+For `M` shots per real/imaginary component and success probability `p`, the
+normalized complex bound is
+`sqrt(4 * log(4 / (1 - p)) / M)`. At the default `p=0.75`, this is
+`sqrt(16 * log(2) / M)`. If the closure normalization is `C`, the Jones-value
+bound is `abs(C)` times the normalized bound, and a requested Jones-value error
+`E` selects
+`ceil(4 * abs(C)**2 * log(4 / (1 - p)) / E**2)` shots per component.
+
+The AJL paper states its trace guarantee as normalized epsilon times
+`d**(strands - 1)`. `target_additive_error` is instead the absolute statistical
+tolerance on the returned Jones value, so the evaluator performs that
+normalization conversion. `shots` and `target_additive_error` are mutually
+exclusive. `success_probability` may be used with explicit, default, or
+error-derived shots.
+
+These Hoeffding bounds assume ideal independent sampling. They exclude hardware
+noise, correlations introduced by a custom sampler, floating-point roundoff,
+and model error. Level-4 synthesis error remains separate in
+`value_synthesis_error_bound`; it is not consumed from
+`target_additive_error`.
 
 Select a plat closure to evaluate only `|1010...10>`:
 

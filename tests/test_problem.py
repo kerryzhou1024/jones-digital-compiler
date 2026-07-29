@@ -298,6 +298,24 @@ def test_problem_shot_evaluation_is_reproducible() -> None:
     assert first.total_shots == 2 * 256
 
 
+def test_problem_target_additive_error_matches_legacy_wrapper() -> None:
+    problem = JonesProblem("s1^2", strands=2)
+    kwargs = {
+        "method": "shots",
+        "circuit_level": 2,
+        "target_additive_error": 1.5,
+        "success_probability": 0.9,
+        "seed": 23,
+    }
+    facade = problem.evaluate(**kwargs)
+    legacy = evaluate_jones("s1^2", strands=2, **kwargs)
+
+    assert facade.shots_per_component == legacy.shots_per_component
+    assert facade.value_additive_error_bound == legacy.value_additive_error_bound
+    assert facade.ajl_success_probability == 0.9
+    assert facade.value_additive_error_bound <= 1.5
+
+
 @pytest.mark.parametrize(
     "problem",
     [
