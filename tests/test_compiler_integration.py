@@ -19,9 +19,8 @@ from digital_compiler import (
     RecomputePrefixHeight,
     SwitchCaseHeightSynthesis,
     circuit_gate_count_depth,
-    compilation_summary,
+    compilation_info,
     level_1_varphi_names,
-    print_compilation_summary,
     register_signature,
 )
 from digital_compiler.lowering import assert_level_2_contract, assert_level_3_contract
@@ -323,41 +322,58 @@ def test_default_k5_resources_and_metadata_regression() -> None:
         "c_varphi_sigma_1_plus",
         "c_varphi_sigma_1_plus",
     )
-    summary = compilation_summary(compilation)
-    assert summary["level_3_lowering_policies"] == {
+    levels = dict(compilation_info(compilation).reports)
+    assert levels["Level 3"].compiler_policies["lowering_policies"] == {
         "mcx": "no_ancilla_recursive_phase",
         "multi_controlled_rotations": "gray_code_sparse_multiplexor",
         "multi_controlled_phase": "recursive_corrected_rz",
     }
-    assert summary["logical_qubits_each_level"] == 6
-    assert summary["prefix_height_strategy"] == "rolling"
-    assert summary["prefix_height_loads"] == 1
-    assert summary["prefix_height_moves"] == 0
-    assert summary["prefix_height_unloads"] == 1
-    assert summary["prefix_height_path_steps"] == 0
-    assert summary["level_1_gate_count_depth"]["total"]["count"] == 5
-    assert summary["level_2_gate_count_depth"]["total"]["count"] == 83
-    assert summary["level_3_gate_count_depth"]["total"]["count"] == 129
+    assert {report.logical_qubits for report in levels.values()} == {6}
+    assert levels["Level 2"].compiler_policies["prefix_height_strategy"] == "rolling"
+    assert levels["Level 2"].compiler_policies["prefix_height_loads"] == 1
+    assert levels["Level 2"].compiler_policies["prefix_height_moves"] == 0
+    assert levels["Level 2"].compiler_policies["prefix_height_unloads"] == 1
+    assert levels["Level 2"].compiler_policies["prefix_height_path_steps"] == 0
+    assert levels["Level 1"].quantum_gate_count == 5
+    assert levels["Level 2"].quantum_gate_count == 83
+    assert levels["Level 3"].quantum_gate_count == 129
 
     baseline = AJLCompiler(
         AJLPathModel(2, 5),
         CompilerConfig(prefix_height=RecomputePrefixHeight()),
     ).compile_hadamard_test("s1^2", "10")
-    baseline_summary = compilation_summary(baseline)
+    baseline_levels = dict(compilation_info(baseline).reports)
     assert sum(baseline.level_2_multicontrolled.count_ops().values()) == 96
     assert sum(baseline.level_3_single_control.count_ops().values()) == 170
-    assert baseline_summary["prefix_height_strategy"] == "recompute"
-    assert baseline_summary["level_2_gate_count_depth"]["total"]["count"] == 95
-    assert baseline_summary["level_3_gate_count_depth"]["total"]["count"] == 169
+    assert (
+        baseline_levels["Level 2"].compiler_policies["prefix_height_strategy"]
+        == "recompute"
+    )
+    assert baseline_levels["Level 2"].quantum_gate_count == 95
+    assert baseline_levels["Level 3"].quantum_gate_count == 169
 
 
-def test_printed_compilation_summary_has_one_clear_table_per_level(capsys) -> None:
+def test_compilation_info_reports_one_column_per_compiler_level(capsys) -> None:
     compilation = AJLCompiler(AJLPathModel(2, 5)).compile_hadamard_test("s1^2", "10")
-    print_compilation_summary(compilation)
+    report = compilation_info(compilation)
+
+    assert [label for label, _ in report.reports] == [
+        "Level 1",
+        "Level 2",
+        "Level 3",
+    ]
+    # A bare compilation has no closure or AJL root, but it does know its word.
+    assert {info.closure for _, info in report.reports} == {"n/a"}
+    assert {info.word for _, info in report.reports} == {"sigma_1 sigma_1"}
+
+    print(report)
     output = capsys.readouterr().out
 
-    assert output.count("exact gate count | depth") == 3
-    assert output.count("TOTAL quantum gates") == 3
-    assert "gate                     count | depth" in output
-    assert "mcphase" in output
-    assert "measure" not in output
+    assert "Circuit comparison" in output
+    for label in ("Level 1", "Level 2", "Level 3"):
+        assert label in output
+    # Level 2 keeps its multi-controlled phase family, and measurements are
+    # reported separately from the quantum gate families.
+    assert "MCPhase" in output
+    assert "gate: measure" not in output
+    assert "measurements" in output

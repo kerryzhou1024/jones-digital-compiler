@@ -130,6 +130,30 @@ These are pre-transpilation, single-circuit logical resources. They are not
 physical-qubit, surface-code, or total closure-workload estimates. Level 3
 retains its detailed gate-family view and still contains arbitrary rotations.
 
+To see every compiler level of one Hadamard-test component side by side, use
+`compilation_info`. It is the `AJLCompiler` counterpart to `compare_circuits`
+and builds on the same `CircuitInfo` reports, so there is a single reporting
+path:
+
+```python
+from digital_compiler import AJLCompiler, AJLPathModel, compilation_info
+
+compilation = AJLCompiler(AJLPathModel(2, 5)).compile_hadamard_test("s1^2", "10")
+report = compilation_info(compilation)
+
+report                                  # side-by-side notebook table
+print(report)                           # deterministic terminal table
+report.as_dict()                        # structured research data
+
+levels = dict(report.reports)
+levels["Level 2"].quantum_gate_count
+levels["Level 2"].compiler_policies["prefix_height_loads"]
+```
+
+A bare compilation carries no closure or AJL root — those are evaluation
+concepts supplied by `JonesProblem` — so those identity fields read `n/a`.
+Use `JonesProblem` when the report should describe a closure workload.
+
 ## Level 4 Clifford+T
 
 Level 4 is opt-in because arbitrary rotations require an explicit approximation

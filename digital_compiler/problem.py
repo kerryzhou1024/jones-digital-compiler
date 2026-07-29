@@ -38,10 +38,12 @@ CircuitLevelSelection = CompilerLevel | Literal["all"]
 @dataclass(frozen=True)
 class _CircuitProvenance:
     word: BraidWord
-    closure: ClosureType
     strands: int
-    k: int
     config: CompilerConfig
+    # Closure and AJL root are evaluation concepts. A circuit reported straight
+    # from AJLCompiler has neither, so both stay optional.
+    closure: ClosureType | None = None
+    k: int | None = None
 
 
 @dataclass(frozen=True)

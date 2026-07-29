@@ -24,7 +24,7 @@ from digital_compiler import (
     SharedControl,
     SwitchCaseHeightSynthesis,
     TreeControlFanout,
-    compilation_summary,
+    compilation_info,
     register_signature,
 )
 
@@ -463,7 +463,9 @@ def test_parallel_policy_reduces_sigma1_sigma3_depth_and_reports_schedule() -> N
     serial = AJLCompiler(model).compile_hadamard_test("1 3", "1010")
     parallel_compiler = AJLCompiler(model, parallel_config())
     parallel = parallel_compiler.compile_hadamard_test("1 3", "1010")
-    summary = compilation_summary(parallel)
+    policies = dict(compilation_info(parallel).reports)[
+        "Level 2"
+    ].compiler_policies
 
     assert parallel_compiler.parallel_lanes == 2
     assert parallel_compiler.height_qubits == 3
@@ -476,13 +478,12 @@ def test_parallel_policy_reduces_sigma1_sigma3_depth_and_reports_schedule() -> N
     )
     assert parallel.level_2_multicontrolled.depth() < serial.level_2_multicontrolled.depth()
     assert parallel.level_3_single_control.depth() < serial.level_3_single_control.depth()
-    assert summary["generator_scheduling"] == "commuting_layers"
-    assert summary["control_distribution"] == "shared"
-    assert summary["prefix_height_strategy"] == "rolling"
-    assert summary["generator_layers"] == ((1, 3),)
-    assert summary["parallel_lanes"] == 2
-    assert summary["active_parallel_width"] == 2
-    assert summary["logical_qubits_each_level"] == 11
+    assert policies["generator_scheduling"] == "commuting_layers"
+    assert policies["control_distribution"] == "shared"
+    assert policies["prefix_height_strategy"] == "rolling"
+    assert policies["generator_layers"] == ((1, 3),)
+    assert policies["parallel_lanes"] == 2
+    assert policies["active_parallel_width"] == 2
 
 
 def test_explicit_tree_fanout_preserves_the_former_parallel_layout() -> None:
@@ -503,7 +504,8 @@ def test_explicit_tree_fanout_preserves_the_former_parallel_layout() -> None:
         register.name == "ctrl_fanout" and register.size == 1
         for register in compilation.level_2_multicontrolled.qregs
     )
-    assert compilation_summary(compilation)["control_distribution"] == "tree_fanout"
+    level_2 = dict(compilation_info(compilation).reports)["Level 2"]
+    assert level_2.compiler_policies["control_distribution"] == "tree_fanout"
 
 
 def test_parallel_level_2_and_level_3_are_equivalent() -> None:

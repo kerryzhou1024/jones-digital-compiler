@@ -85,12 +85,8 @@ from .reporting import (
     CircuitInfo,
     circuit_gate_count_depth,
     compare_circuits,
-    compilation_summary,
+    compilation_info,
     level_1_varphi_names,
-    level_2_gate_family_counts,
-    level_3_gate_family_counts,
-    level_4_gate_family_counts,
-    print_compilation_summary,
 )
 
 __all__ = [
@@ -162,17 +158,13 @@ __all__ = [
     "circuit_gate_count_depth",
     "clean_complex",
     "coerce_braid_word",
-    "compilation_summary",
     "compare_circuits",
+    "compilation_info",
     "controlled_varphi_gate",
     "evaluate_jones",
     "gray_code_rotation_angles",
     "level_1_varphi_names",
-    "level_2_gate_family_counts",
-    "level_3_gate_family_counts",
-    "level_4_gate_family_counts",
     "prepare_basis_path",
-    "print_compilation_summary",
     "register_signature",
     "t_layer_widths",
 ]

@@ -14,7 +14,7 @@ from digital_compiler import (
     CompilerConfig,
     JonesProblem,
     assert_clifford_t_contract,
-    compilation_summary,
+    compilation_info,
     register_signature,
     t_layer_widths,
 )
@@ -111,10 +111,10 @@ def test_level_4_preserves_registers_and_reports_resources() -> None:
     assert synthesis["allocation"] == "uniform"
     assert synthesis["cache_error"] == 0.0
 
-    summary = compilation_summary(compilation)
-    assert summary["level_4_compiler_level"] == 4
-    assert set(summary["level_4_gate_families"]) == {"Clifford", "T"}
-    assert summary["level_4_resources"]["t_count"] == resources.t_count
+    level_4 = dict(compilation_info(compilation).reports)["Level 4"]
+    assert level_4.compiler_level == 4
+    assert set(level_4.gate_families) == {"Clifford", "T"}
+    assert level_4.level_4_resources["t_count"] == resources.t_count
 
     repeated = compiler.compile_hadamard_test("s1", "10", measure=True)
     assert repeated.level_4_clifford_t == compilation.level_4_clifford_t
