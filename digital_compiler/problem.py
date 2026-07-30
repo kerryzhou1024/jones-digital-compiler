@@ -112,13 +112,18 @@ class CompiledCircuit:
 
 @dataclass(frozen=True, init=False)
 class JonesProblem:
-    """One immutable braid, closure, AJL root, and compiler configuration."""
+    """One immutable braid, closure, AJL root, and compiler configuration.
+
+    ``writhe`` is the oriented diagram writhe used for normalization. Trace
+    closure derives it from the braid word; plat closure uses the supplied
+    value.
+    """
 
     word: BraidWord
     closure: ClosureType
     strands: int
     k: int
-    writhe: int | None
+    writhe: int
     config: CompilerConfig
     model: AJLPathModel = field(repr=False, compare=False)
     _closure_spec: ClosureSpec = field(repr=False, compare=False)
@@ -147,7 +152,12 @@ class JonesProblem:
         object.__setattr__(self, "closure", closure_spec.kind)
         object.__setattr__(self, "strands", model.strands)
         object.__setattr__(self, "k", model.level)
-        object.__setattr__(self, "writhe", closure_spec.writhe)
+        effective_writhe = (
+            normalized_word.writhe
+            if closure_spec.kind == "trace"
+            else closure_spec.writhe
+        )
+        object.__setattr__(self, "writhe", effective_writhe)
         object.__setattr__(self, "config", active_config)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "_closure_spec", closure_spec)
@@ -304,7 +314,7 @@ class JonesProblem:
         return self._evaluator.evaluate(
             self.word,
             closure=self.closure,
-            plat_writhe=self.writhe,
+            plat_writhe=self._closure_spec.writhe,
             method=method,
             circuit_level=circuit_level,
             shots=shots,

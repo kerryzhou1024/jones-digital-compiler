@@ -29,7 +29,7 @@ def test_problem_normalizes_and_exposes_one_immutable_domain_object() -> None:
 
     assert problem.word == BraidWord.power(1, 2)
     assert problem.closure == "trace"
-    assert problem.writhe is None
+    assert problem.writhe == problem.word.writhe == 2
     assert problem.strands == 2
     assert problem.k == 5
     assert problem.A == problem.model.A
@@ -84,6 +84,7 @@ def test_plat_problem_selects_only_the_alternating_evaluation_path() -> None:
     )
 
     assert problem.valid_paths == problem.model.valid_paths()
+    assert problem.writhe == 2
     assert problem.evaluation_paths == ((1, 0, 1, 0),)
     assert [(item.path, item.part) for item in problem.circuits()] == [
         ((1, 0, 1, 0), "real"),

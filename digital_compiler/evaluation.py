@@ -279,6 +279,15 @@ class JonesEvaluation:
         return self.model.level
 
     @property
+    def writhe(self) -> int:
+        """Return the oriented diagram writhe used for normalization."""
+
+        if self.closure == "trace":
+            return self.word.writhe
+        assert self.plat_writhe is not None
+        return self.plat_writhe
+
+    @property
     def path_amplitudes(self) -> Mapping[tuple[int, ...], complex] | None:
         if self.path_estimates is None:
             return None

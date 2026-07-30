@@ -63,6 +63,7 @@ def test_exact_hopf_evaluation_matches_analytic_value(circuit_level: int) -> Non
     assert abs(result.value - expected) < TOL
     assert result.method == "statevector"
     assert result.closure == "trace"
+    assert result.writhe == result.word.writhe == 2
     assert result.plat_writhe is None
     assert result.markov_trace is not None
     assert result.plat_amplitude is None
@@ -126,6 +127,7 @@ def test_exact_four_strand_plat_uses_only_the_alternating_path(
 
     assert result.value == pytest.approx(result.model.d)
     assert result.closure == "plat"
+    assert result.writhe == 0
     assert result.plat_writhe == 0
     assert result.markov_trace is None
     assert result.plat_amplitude == pytest.approx(1.0)
