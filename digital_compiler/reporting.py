@@ -476,6 +476,7 @@ def _compiler_policy_summary(
     metadata = circuit.metadata or {}
     return {
         "height_strategy": metadata.get("height_strategy"),
+        "height_encoding": metadata.get("height_encoding"),
         "generator_scheduling": metadata.get("generator_scheduling"),
         "control_distribution": metadata.get("control_distribution"),
         "prefix_height_strategy": metadata.get("prefix_height_strategy"),

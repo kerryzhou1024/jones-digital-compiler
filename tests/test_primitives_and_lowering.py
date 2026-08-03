@@ -54,6 +54,27 @@ def test_standard_toffoli_inventory_and_unitary() -> None:
     assert dict(custom.count_ops()) == {"h": 2, "cx": 6, "t": 4, "tdg": 3}
 
 
+@pytest.mark.parametrize("controlled", [False, True])
+@pytest.mark.parametrize("width", range(1, 6))
+def test_decrement_matches_modular_subtraction(width: int, controlled: bool) -> None:
+    control_qubits = int(controlled)
+    circuit = QuantumCircuit(width + control_qubits)
+    control = 0 if controlled else None
+    register = range(control_qubits, width + control_qubits)
+    QuantumAdder(width).decrement(circuit, register, control=control)
+
+    modulus = 1 << width
+    for basis in range(1 << circuit.num_qubits):
+        enable = basis & 1 if controlled else 1
+        value = basis >> 1 if controlled else basis
+        expected_value = (value - enable) % modulus
+        expected_basis = enable | (expected_value << 1) if controlled else expected_value
+
+        actual = Statevector.from_int(basis, 1 << circuit.num_qubits).evolve(circuit)
+        expected = Statevector.from_int(expected_basis, 1 << circuit.num_qubits)
+        np.testing.assert_allclose(actual.data, expected.data, atol=1e-9)
+
+
 @pytest.mark.parametrize(
     "method_name,direction",
     [("add_path_step", 1), ("subtract_path_step", -1)],
@@ -94,6 +115,37 @@ def test_path_step_add_and_subtract_are_exact_inverses(width: int) -> None:
     assert unitary_error(circuit, QuantumCircuit(width + 1)) < 1e-10
 
 
+@pytest.mark.parametrize(
+    "method_name,expected_instructions",
+    [
+        (
+            "add_path_step",
+            (("x", (1,)), ("cx", (1, 2)), ("cx", (0, 2))),
+        ),
+        (
+            "subtract_path_step",
+            (("cx", (1, 2)), ("x", (1,)), ("cx", (0, 2))),
+        ),
+    ],
+)
+def test_width_two_path_step_has_canonical_gate_sequence(
+    method_name: str,
+    expected_instructions: tuple[tuple[str, tuple[int, ...]], ...],
+) -> None:
+    circuit = QuantumCircuit(3)
+    getattr(QuantumAdder(2), method_name)(circuit, 0, range(1, 3))
+
+    instructions = tuple(
+        (
+            instruction.operation.name,
+            tuple(circuit.find_bit(qubit).index for qubit in instruction.qubits),
+        )
+        for instruction in circuit.data
+    )
+    assert instructions == expected_instructions
+    assert dict(circuit.count_ops()) == {"cx": 2, "x": 1}
+
+
 @pytest.mark.parametrize("method_name", ["add_path_step", "subtract_path_step"])
 @pytest.mark.parametrize("width", range(1, 6))
 def test_path_step_adder_uses_at_most_width_minus_one_controls(
@@ -114,6 +166,7 @@ def test_path_step_adder_uses_at_most_width_minus_one_controls(
         and instruction.operation.base_gate.name == "x"
     ]
     assert max(x_control_counts, default=0) == width - 1
+    assert len(circuit.data) == 2 * width - 1
     if width == 1:
         assert dict(circuit.count_ops()) == {"x": 1}
 

@@ -282,8 +282,10 @@ ladder.
 
 Prefix heights use rolling routing by default. A live height selector moves
 between consecutive generator indices using only the intervening path steps.
-Use the former compute/apply/uncompute behavior as an explicit resource
-baseline:
+The selector stores `height - 1`, requiring `ceil(log2(k - 1))` qubits for the
+`k - 1` valid AJL vertices. Thus `k=5` uses two selector qubits per lane, and
+the clean all-zero register already represents vertex 1. Use the former
+compute/apply/uncompute behavior as an explicit resource baseline:
 
 ```python
 from digital_compiler import CompilerConfig, RecomputePrefixHeight

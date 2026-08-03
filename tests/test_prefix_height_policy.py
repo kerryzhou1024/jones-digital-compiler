@@ -103,8 +103,8 @@ def test_parallel_route_uses_the_minimum_cost_lane_assignment() -> None:
     circuit = compiler.level_2_braid_circuit(word)
     assert circuit.metadata["prefix_height_strategy"] == "rolling"
     assert circuit.metadata["prefix_height_path_steps"] == 396
-    assert sum(circuit.count_ops().values()) == 4083
-    assert circuit.depth() == 1267
+    assert sum(circuit.count_ops().values()) == 1245
+    assert circuit.depth() == 434
 
 
 def test_serial_signed_path_step_adder_resource_regression() -> None:
@@ -112,8 +112,8 @@ def test_serial_signed_path_step_adder_resource_regression() -> None:
         "100 99 101"
     )
 
-    assert sum(circuit.count_ops().values()) == 2131
-    assert circuit.depth() == 1309
+    assert sum(circuit.count_ops().values()) == 663
+    assert circuit.depth() == 453
     assert circuit.count_ops().get("mcx", 0) == 0
 
 

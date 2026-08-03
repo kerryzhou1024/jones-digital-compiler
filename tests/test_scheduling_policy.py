@@ -374,7 +374,7 @@ def test_parallel_hadamard_test_matches_dense_and_cleans_scratch(
 
 def test_parallel_clean_ancilla_workspace_is_partitioned_by_lane() -> None:
     compiler = AJLCompiler(
-        AJLPathModel(5, 9),
+        AJLPathModel(5, 17),
         parallel_config(mcx=CleanAncillaMCX(), max_lanes=2),
     )
     level_3 = compiler.level_3_braid_circuit("2 4")
@@ -468,10 +468,10 @@ def test_parallel_policy_reduces_sigma1_sigma3_depth_and_reports_schedule() -> N
     ].compiler_policies
 
     assert parallel_compiler.parallel_lanes == 2
-    assert parallel_compiler.height_qubits == 3
-    assert parallel_compiler.height_register_qubits == 6
+    assert parallel_compiler.height_qubits == 2
+    assert parallel_compiler.height_register_qubits == 4
     assert parallel_compiler.control_fanout_qubits == 0
-    assert parallel.logical_qubits == 11
+    assert parallel.logical_qubits == 9
     assert all(
         register.name != "ctrl_fanout"
         for register in parallel.level_2_multicontrolled.qregs
@@ -480,6 +480,7 @@ def test_parallel_policy_reduces_sigma1_sigma3_depth_and_reports_schedule() -> N
     assert parallel.level_3_single_control.depth() < serial.level_3_single_control.depth()
     assert policies["generator_scheduling"] == "commuting_layers"
     assert policies["control_distribution"] == "shared"
+    assert policies["height_encoding"] == "vertex_minus_one"
     assert policies["prefix_height_strategy"] == "rolling"
     assert policies["generator_layers"] == ((1, 3),)
     assert policies["parallel_lanes"] == 2
@@ -494,7 +495,7 @@ def test_explicit_tree_fanout_preserves_the_former_parallel_layout() -> None:
     compilation = compiler.compile_hadamard_test("1 3", "1010")
 
     assert compiler.control_fanout_qubits == 1
-    assert compilation.logical_qubits == 12
+    assert compilation.logical_qubits == 10
     assert (
         register_signature(compilation.level_1_varphi)
         == register_signature(compilation.level_2_multicontrolled)

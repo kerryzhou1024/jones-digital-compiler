@@ -225,11 +225,18 @@ class QuantumAdder:
 
     def decrement(self, circuit, register, control=None) -> None:
         register = list(register)
-        for qubit in register:
-            circuit.x(qubit)
-        self.increment(circuit, register, control=control)
-        for qubit in register:
-            circuit.x(qubit)
+        prefix = [] if control is None else [control]
+        if control is None:
+            circuit.x(register[0])
+        else:
+            circuit.cx(control, register[0])
+        for target_index in range(1, self.width):
+            controls = [*prefix, *register[:target_index]]
+            self._append_multi_controlled_x(
+                circuit,
+                controls,
+                register[target_index],
+            )
 
     def add_path_step(self, circuit, bit, register) -> None:
         register = list(register)

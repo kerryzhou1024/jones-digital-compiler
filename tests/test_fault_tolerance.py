@@ -155,6 +155,13 @@ def test_exact_clifford_t_input_consumes_no_synthesis_budget() -> None:
     assert_clifford_t_contract(result.circuit)
 
 
+def test_clifford_t_contract_accepts_pauli_y() -> None:
+    circuit = QuantumCircuit(1)
+    circuit.y(0)
+
+    assert_clifford_t_contract(circuit)
+
+
 def test_dependency_aware_t_layers() -> None:
     circuit = QuantumCircuit(3)
     circuit.t(0)

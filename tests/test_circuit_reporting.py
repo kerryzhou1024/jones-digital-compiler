@@ -53,17 +53,16 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         trace.quantum_gate_count,
         trace.quantum_gate_depth,
         trace.measurement_count,
-    ) == ("trace", "10", 3, 6, 129, 105, 1)
+    ) == ("trace", "10", 3, 5, 61, 53, 1)
     assert trace.gate_families == {
-        "CNOT": 58,
+        "CNOT": 28,
         "CRz": 2,
-        "H": 6,
-        "Ry": 24,
+        "H": 2,
+        "Ry": 12,
         "Rz": 12,
-        "T/Tdg": 14,
-        "X": 13,
+        "X": 5,
     }
-    assert trace.exact_gate_stats["t"] == {"count": 8, "depth": 6}
+    assert trace.exact_gate_stats["rz"] == {"count": 12, "depth": 10}
 
     assert (
         plat.closure,
@@ -73,9 +72,10 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         plat.quantum_gate_count,
         plat.quantum_gate_depth,
         plat.measurement_count,
-    ) == ("plat", "1010", 3, 8, 206, 150, 1)
-    assert plat.gate_families["CNOT"] == 86
-    assert plat.gate_families["T/Tdg"] == 42
+    ) == ("plat", "1010", 3, 7, 68, 54, 1)
+    assert plat.gate_families["CNOT"] == 32
+    assert plat.gate_families["X"] == 8
+    assert "T/Tdg" not in plat.gate_families
     assert plat.exact_gate_stats["rz"] == {"count": 12, "depth": 10}
 
     for report in (trace, plat):
@@ -100,9 +100,9 @@ def test_reports_select_gate_families_from_the_recorded_level() -> None:
 
     assert [report.compiler_level for report in reports] == [1, 2, 3]
     assert reports[0].gate_families["controlled varphi"] == 2
-    assert any(name.startswith("MCX[") for name in reports[1].gate_families)
+    assert not any(name.startswith("MCX[") for name in reports[1].gate_families)
     assert any(name.startswith("MCPhase[") for name in reports[1].gate_families)
-    assert reports[2].gate_families["CNOT"] == 58
+    assert reports[2].gate_families["CNOT"] == 28
     assert "controlled varphi" not in reports[2].gate_families
 
 
@@ -141,10 +141,11 @@ def test_report_is_immutable_structured_and_has_deterministic_rich_output() -> N
     assert first_dict["resources"]["quantum_registers"] == (
         ("ctrl", 1),
         ("path", 2),
-        ("height", 3),
+        ("height", 2),
         ("adder_work", 0),
     )
     assert first_dict["compiler"]["height_strategy"] == "multiplexed"
+    assert first_dict["compiler"]["height_encoding"] == "vertex_minus_one"
     assert first_dict["compiler"]["control_distribution"] == "shared"
     assert first_dict["compiler"]["prefix_height_strategy"] == "rolling"
     assert first_dict["compiler"]["prefix_height_loads"] == 1
@@ -156,7 +157,7 @@ def test_report_is_immutable_structured_and_has_deterministic_rich_output() -> N
     assert str(report) == str(report)
 
     first_dict["gates"]["families"]["CNOT"] = -1
-    assert report.gate_families["CNOT"] == 58
+    assert report.gate_families["CNOT"] == 28
     with pytest.raises(TypeError):
         report.gate_families["CNOT"] = -1
     with pytest.raises(TypeError):

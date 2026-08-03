@@ -255,8 +255,9 @@ def test_problem_propagates_compiler_policy_to_circuits_and_results() -> None:
     assert circuit.metadata["compiler_config"] == config.metadata() | {
         "workspace_qubits": 0,
         "workspace_qubits_per_lane": 0,
-        "height_selector_qubits": 3,
-        "height_register_qubits": 6,
+        "height_encoding": "vertex_minus_one",
+        "height_selector_qubits": 2,
+        "height_register_qubits": 4,
         "parallel_lanes": 2,
         "control_fanout_qubits": 0,
     }

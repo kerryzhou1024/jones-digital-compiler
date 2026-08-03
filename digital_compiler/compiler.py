@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -35,6 +34,7 @@ LEVEL_4_STATUS = (
 )
 
 CompilerLevel = Literal[1, 2, 3, 4]
+_HEIGHT_ENCODING = "vertex_minus_one"
 
 
 def register_signature(
@@ -121,7 +121,8 @@ class AJLCompiler:
         )
         self.strands = model.strands
         self.level = model.level
-        self.height_selector_qubits = max(1, math.ceil(math.log2(self.level)))
+        # Encode the k - 1 valid vertices h = 1, ..., k - 1 as h - 1.
+        self.height_selector_qubits = (self.level - 2).bit_length()
         self.height_qubits = self.height_selector_qubits
         self.adder = QuantumAdder(self.height_qubits)
         self.parallel_lanes = self._validate_lane_capacity(
@@ -165,7 +166,7 @@ class AJLCompiler:
     ) -> tuple[tuple[float, ...], tuple[float, ...]]:
         basis_angles = [0.0] * (1 << self.height_selector_qubits)
         for height in self.model.valid_heights:
-            basis_angles[height] = self.model.projector_angle(height)
+            basis_angles[height - 1] = self.model.projector_angle(height)
         return tuple(basis_angles), tuple(-2.0 * angle for angle in basis_angles)
 
     @property
@@ -199,6 +200,7 @@ class AJLCompiler:
         metadata = self.config.metadata()
         metadata["workspace_qubits"] = self.work_qubits
         metadata["workspace_qubits_per_lane"] = self.work_qubits_per_lane
+        metadata["height_encoding"] = _HEIGHT_ENCODING
         metadata["height_selector_qubits"] = self.height_selector_qubits
         metadata["height_register_qubits"] = self.height_register_qubits
         metadata["parallel_lanes"] = self.parallel_lanes
@@ -346,6 +348,7 @@ class AJLCompiler:
             "generator_layers": signed_layers,
             "parallel_lanes": self.parallel_lanes,
             "active_parallel_width": max((len(layer) for layer in schedule), default=0),
+            "height_encoding": _HEIGHT_ENCODING,
             "height_selector_qubits": self.height_selector_qubits,
             "workspace_qubits_per_lane": self.work_qubits_per_lane,
             "prefix_height_strategy": self.config.prefix_height.name,
@@ -469,14 +472,13 @@ class AJLCompiler:
         return controlled_varphi_gate(generator, self.strands + workspace_qubits)
 
     def _compute_prefix_height(self, circuit, path, height, index: int) -> None:
-        self.adder.increment(circuit, height)
+        # The clean all-zero lane already encodes the initial AJL vertex h = 1.
         for prefix_bit in path[: index - 1]:
             self.adder.add_path_step(circuit, prefix_bit, height)
 
     def _uncompute_prefix_height(self, circuit, path, height, index: int) -> None:
         for prefix_bit in reversed(path[: index - 1]):
             self.adder.subtract_path_step(circuit, prefix_bit, height)
-        self.adder.decrement(circuit, height)
 
     def _transition_prefix_height(
         self,

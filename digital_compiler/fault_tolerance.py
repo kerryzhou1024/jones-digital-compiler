@@ -17,10 +17,10 @@ from qiskit.transpiler.passes import (
 from .lowering import assert_level_3_contract
 from .policies import CliffordTConfig
 
-CLIFFORD_GATE_NAMES = frozenset({"h", "s", "sdg", "x", "z", "cx"})
+CLIFFORD_GATE_NAMES = frozenset({"h", "s", "sdg", "x", "y", "z", "cx"})
 T_GATE_NAMES = frozenset({"t", "tdg"})
 CLIFFORD_T_GATE_NAMES = CLIFFORD_GATE_NAMES | T_GATE_NAMES
-CLIFFORD_T_BASIS = ("h", "s", "sdg", "x", "z", "cx", "t", "tdg")
+CLIFFORD_T_BASIS = ("h", "s", "sdg", "x", "y", "z", "cx", "t", "tdg")
 CLIFFORD_RZ_BASIS = (*CLIFFORD_T_BASIS, "rz")
 
 

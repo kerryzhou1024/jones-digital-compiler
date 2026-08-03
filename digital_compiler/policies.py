@@ -606,7 +606,12 @@ class TreeControlFanout:
 
 
 class HeightSynthesisPolicy(Protocol):
-    """Strategy for applying the height-dependent local AJL crossing."""
+    """Apply a local AJL crossing selected by a register encoding ``height - 1``.
+
+    AJL model methods continue to use the mathematical vertex labels
+    ``1, ..., k - 1``. The circuit selector and its alignment-angle table use
+    the compact zero-based codes ``0, ..., k - 2``.
+    """
 
     name: str
 
@@ -689,8 +694,9 @@ class SwitchCaseHeightSynthesis:
         left = path[index - 1]
         right = path[index]
         for selected_height in model.valid_heights:
+            encoded_height = selected_height - 1
             binary_height = [
-                (selected_height >> bit) & 1 for bit in range(len(height))
+                (encoded_height >> bit) & 1 for bit in range(len(height))
             ]
             for bit, value in enumerate(binary_height):
                 if value == 0:

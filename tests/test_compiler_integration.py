@@ -83,6 +83,79 @@ def assert_braid_matches_dense(
             assert math.sqrt(leakage) < TOL
 
 
+@pytest.mark.parametrize("level", [3, 4, 5, 6, 9])
+def test_height_encoding_uses_the_minimum_zero_based_selector(level: int) -> None:
+    model = AJLPathModel(strands=2, level=level)
+    compiler = AJLCompiler(model)
+    expected_width = (level - 2).bit_length()
+
+    assert compiler.height_qubits == expected_width
+    assert compiler.height_selector_qubits == expected_width
+    assert len(compiler.projector_basis_angles) == 1 << expected_width
+    assert len(compiler.projector_alignment_angles) == 1 << expected_width
+
+    for height in model.valid_heights:
+        encoded_height = height - 1
+        assert compiler.projector_basis_angles[encoded_height] == pytest.approx(
+            model.projector_angle(height)
+        )
+        assert compiler.projector_alignment_angles[encoded_height] == pytest.approx(
+            -2.0 * model.projector_angle(height)
+        )
+
+    for encoded_height in range(level - 1, 1 << expected_width):
+        assert compiler.projector_basis_angles[encoded_height] == 0.0
+        assert compiler.projector_alignment_angles[encoded_height] == 0.0
+
+    circuit = compiler.level_2_braid_circuit("")
+    assert circuit.metadata["height_encoding"] == "vertex_minus_one"
+    assert circuit.metadata["compiler_config"]["height_encoding"] == "vertex_minus_one"
+
+
+def test_height_one_load_and_unload_are_gate_free() -> None:
+    compiler = AJLCompiler(AJLPathModel(strands=2, level=5))
+    circuit = QuantumCircuit(compiler.height_qubits)
+    height = list(circuit.qubits)
+
+    compiler._compute_prefix_height(circuit, (), height, index=1)
+    compiler._uncompute_prefix_height(circuit, (), height, index=1)
+
+    assert circuit.data == []
+
+
+def test_k9_minimal_height_width_needs_no_clean_adder_workspace() -> None:
+    config = CompilerConfig(level3=Level3Policy(mcx=CleanAncillaMCX()))
+    compiler = AJLCompiler(AJLPathModel(strands=3, level=9), config)
+
+    assert compiler.height_qubits == 3
+    assert compiler.work_qubits_per_lane == 0
+    assert compiler.work_qubits == 0
+
+
+@pytest.mark.parametrize(
+    "height_policy",
+    [MultiplexedHeightSynthesis(), SwitchCaseHeightSynthesis()],
+)
+@pytest.mark.parametrize("level", [3, 4, 5, 6, 9])
+@pytest.mark.parametrize("compiler_level", [2, 3])
+@pytest.mark.parametrize("controlled", [False, True])
+def test_zero_based_height_encoding_matches_dense_across_levels(
+    height_policy,
+    level: int,
+    compiler_level: int,
+    controlled: bool,
+) -> None:
+    model = AJLPathModel(strands=3, level=level)
+    compiler = AJLCompiler(model, CompilerConfig(height=height_policy))
+    assert_braid_matches_dense(
+        compiler,
+        DenseAJLReference(model),
+        "1 2 -1",
+        level=compiler_level,
+        controlled=controlled,
+    )
+
+
 @pytest.mark.parametrize(
     "height_policy",
     [MultiplexedHeightSynthesis(), SwitchCaseHeightSynthesis()],
@@ -182,7 +255,7 @@ def test_policy_injection_changes_workspace_dispatch_and_metadata() -> None:
     compilation = compiler.compile_hadamard_test("s1^2", "10")
 
     assert compiler.work_qubits == 2
-    assert compiler.logical_qubits == 8
+    assert compiler.logical_qubits == 7
     assert register_signature(compilation.level_1_varphi)[0][-1] == ("adder_work", 2)
     metadata = compilation.level_3_single_control.metadata
     assert metadata["lowering_policies"]["mcx"] == "test_two_workspace_mcx"
@@ -195,19 +268,19 @@ def test_default_policy_uses_no_workspace_and_preserves_semantics() -> None:
     compilation = compiler.compile_hadamard_test("s1^2", "10")
 
     assert compiler.work_qubits == 0
-    assert compiler.logical_qubits == 6
+    assert compiler.logical_qubits == 5
     expected_registers = (
         ("ctrl", 1),
         ("path", 2),
-        ("height", 3),
+        ("height", 2),
         ("adder_work", 0),
     )
     assert register_signature(compilation.level_1_varphi)[0] == expected_registers
     assert register_signature(compilation.level_2_multicontrolled)[0] == expected_registers
     assert register_signature(compilation.level_3_single_control)[0] == expected_registers
-    assert compilation.level_1_varphi.num_qubits == 6
-    assert compilation.level_2_multicontrolled.num_qubits == 6
-    assert compilation.level_3_single_control.num_qubits == 6
+    assert compilation.level_1_varphi.num_qubits == 5
+    assert compilation.level_2_multicontrolled.num_qubits == 5
+    assert compilation.level_3_single_control.num_qubits == 5
 
     metadata = compilation.level_3_single_control.metadata
     assert metadata["lowering_policies"]["mcx"] == "no_ancilla_recursive_phase"
@@ -247,7 +320,7 @@ def test_clean_ancilla_policy_remains_available_as_an_opt_in() -> None:
     compilation = compiler.compile_hadamard_test("s1^2", "10")
 
     assert compiler.work_qubits == 0
-    assert compiler.logical_qubits == 6
+    assert compiler.logical_qubits == 5
     assert register_signature(compilation.level_1_varphi)[0][-1] == (
         "adder_work",
         0,
@@ -257,19 +330,19 @@ def test_clean_ancilla_policy_remains_available_as_an_opt_in() -> None:
     assert metadata["compiler_config"]["workspace_qubits"] == 0
 
 
-def test_default_no_ancilla_policy_reduces_t_count_for_k9() -> None:
-    model = AJLPathModel(2, 9)
-    default = AJLCompiler(model).compile_hadamard_test("s1", "10")
+def test_default_no_ancilla_policy_reduces_t_count_for_k17() -> None:
+    model = AJLPathModel(3, 17)
+    default = AJLCompiler(model).compile_hadamard_test("s2", "110")
     clean_config = CompilerConfig(level3=Level3Policy(mcx=CleanAncillaMCX()))
-    clean = AJLCompiler(model, clean_config).compile_hadamard_test("s1", "10")
+    clean = AJLCompiler(model, clean_config).compile_hadamard_test("s2", "110")
 
     default_counts = default.level_3_single_control.count_ops()
     clean_counts = clean.level_3_single_control.count_ops()
     default_t_count = default_counts.get("t", 0) + default_counts.get("tdg", 0)
     clean_t_count = clean_counts.get("t", 0) + clean_counts.get("tdg", 0)
 
-    assert default_t_count == 14
-    assert clean_t_count == 56
+    assert default_t_count == 28
+    assert clean_t_count == 112
     assert default_t_count < clean_t_count
 
 
@@ -294,27 +367,24 @@ def test_gate_count_depth_report_uses_exact_gate_names_and_parallel_depth() -> N
 def test_default_k5_resources_and_metadata_regression() -> None:
     compiler = AJLCompiler(AJLPathModel(2, 5))
     compilation = compiler.compile_hadamard_test("s1^2", "10")
-    assert compiler.height_qubits == 3
+    assert compiler.height_qubits == 2
     assert compiler.work_qubits == 0
-    assert compiler.logical_qubits == 6
+    assert compiler.logical_qubits == 5
     assert dict(compilation.level_2_multicontrolled.count_ops()) == {
-        "cx": 38,
-        "ry": 24,
-        "x": 13,
+        "cx": 20,
+        "ry": 12,
+        "x": 5,
         "h": 2,
-        "ccx": 2,
         "p": 2,
         "mcphase": 2,
         "measure": 1,
     }
     assert dict(compilation.level_3_single_control.count_ops()) == {
-        "cx": 58,
-        "ry": 24,
-        "x": 13,
+        "cx": 28,
+        "ry": 12,
+        "x": 5,
         "rz": 12,
-        "t": 8,
-        "tdg": 6,
-        "h": 6,
+        "h": 2,
         "crz": 2,
         "measure": 1,
     }
@@ -328,29 +398,30 @@ def test_default_k5_resources_and_metadata_regression() -> None:
         "multi_controlled_rotations": "gray_code_sparse_multiplexor",
         "multi_controlled_phase": "recursive_corrected_rz",
     }
-    assert {report.logical_qubits for report in levels.values()} == {6}
+    assert {report.logical_qubits for report in levels.values()} == {5}
     assert levels["Level 2"].compiler_policies["prefix_height_strategy"] == "rolling"
     assert levels["Level 2"].compiler_policies["prefix_height_loads"] == 1
     assert levels["Level 2"].compiler_policies["prefix_height_moves"] == 0
     assert levels["Level 2"].compiler_policies["prefix_height_unloads"] == 1
     assert levels["Level 2"].compiler_policies["prefix_height_path_steps"] == 0
+    assert levels["Level 2"].compiler_policies["height_encoding"] == "vertex_minus_one"
     assert levels["Level 1"].quantum_gate_count == 5
-    assert levels["Level 2"].quantum_gate_count == 83
-    assert levels["Level 3"].quantum_gate_count == 129
+    assert levels["Level 2"].quantum_gate_count == 43
+    assert levels["Level 3"].quantum_gate_count == 61
 
     baseline = AJLCompiler(
         AJLPathModel(2, 5),
         CompilerConfig(prefix_height=RecomputePrefixHeight()),
     ).compile_hadamard_test("s1^2", "10")
     baseline_levels = dict(compilation_info(baseline).reports)
-    assert sum(baseline.level_2_multicontrolled.count_ops().values()) == 96
-    assert sum(baseline.level_3_single_control.count_ops().values()) == 170
+    assert sum(baseline.level_2_multicontrolled.count_ops().values()) == 44
+    assert sum(baseline.level_3_single_control.count_ops().values()) == 62
     assert (
         baseline_levels["Level 2"].compiler_policies["prefix_height_strategy"]
         == "recompute"
     )
-    assert baseline_levels["Level 2"].quantum_gate_count == 95
-    assert baseline_levels["Level 3"].quantum_gate_count == 169
+    assert baseline_levels["Level 2"].quantum_gate_count == 43
+    assert baseline_levels["Level 3"].quantum_gate_count == 61
 
 
 def test_compilation_info_reports_one_column_per_compiler_level(capsys) -> None:
