@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -167,7 +168,9 @@ class AJLCompiler:
         basis_angles = [0.0] * (1 << self.height_selector_qubits)
         for height in self.model.valid_heights:
             basis_angles[height - 1] = self.model.projector_angle(height)
-        return tuple(basis_angles), tuple(-2.0 * angle for angle in basis_angles)
+        return tuple(basis_angles), tuple(
+            math.pi - 2.0 * angle for angle in basis_angles
+        )
 
     @property
     def logical_qubits(self) -> int:

@@ -53,14 +53,14 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         trace.quantum_gate_count,
         trace.quantum_gate_depth,
         trace.measurement_count,
-    ) == ("trace", "10", 3, 5, 61, 53, 1)
+    ) == ("trace", "10", 3, 5, 57, 49, 1)
     assert trace.gate_families == {
         "CNOT": 28,
         "CRz": 2,
         "H": 2,
         "Ry": 12,
         "Rz": 12,
-        "X": 5,
+        "X": 1,
     }
     assert trace.exact_gate_stats["rz"] == {"count": 12, "depth": 10}
 
@@ -72,9 +72,9 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         plat.quantum_gate_count,
         plat.quantum_gate_depth,
         plat.measurement_count,
-    ) == ("plat", "1010", 3, 7, 68, 54, 1)
+    ) == ("plat", "1010", 3, 7, 64, 50, 1)
     assert plat.gate_families["CNOT"] == 32
-    assert plat.gate_families["X"] == 8
+    assert plat.gate_families["X"] == 4
     assert "T/Tdg" not in plat.gate_families
     assert plat.exact_gate_stats["rz"] == {"count": 12, "depth": 10}
 

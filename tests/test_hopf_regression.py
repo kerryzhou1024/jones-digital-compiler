@@ -114,19 +114,17 @@ def test_fixed_height_hopf_uses_only_public_primitives() -> None:
 
     assert result.logical_qubits == 3
     assert dict(level_2.count_ops()) == {
-        "x": 5,
+        "x": 1,
         "h": 2,
         "p": 2,
         "cx": 4,
-        "cry": 4,
         "mcphase": 2,
         "measure": 1,
     }
     assert dict(level_3.count_ops()) == {
         "rz": 12,
         "cx": 12,
-        "x": 5,
-        "cry": 4,
+        "x": 1,
         "h": 2,
         "crz": 2,
         "measure": 1,

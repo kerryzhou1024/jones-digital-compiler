@@ -630,7 +630,7 @@ class HeightSynthesisPolicy(Protocol):
 
 @dataclass(frozen=True)
 class MultiplexedHeightSynthesis:
-    """One Gray-code UCRy sandwich indexed by the complete height register."""
+    """Direct-to-one Gray-code UCRy sandwich indexed by the height register."""
 
     name: str = "multiplexed"
 
@@ -661,9 +661,7 @@ class MultiplexedHeightSynthesis:
             left,
             projector_alignment_angles,
         )
-        circuit.x(left)
         append_phase_on_one(circuit, [*extra_controls, right], left, relative_angle)
-        circuit.x(left)
         append_uniformly_controlled_ry(
             circuit,
             selector,

@@ -146,18 +146,18 @@ def test_endpoint_vertices_and_weights_preserve_path_order() -> None:
 
 
 @pytest.mark.parametrize("level", [3, 5, 6])
-def test_projector_alignment(level: int) -> None:
+def test_projector_alignment_to_one(level: int) -> None:
     model = AJLPathModel(strands=3, level=level)
     for height in model.valid_heights:
         state = model.projector_state(height)
-        angle = -2.0 * model.projector_angle(height)
+        angle = math.pi - 2.0 * model.projector_angle(height)
         rotation = np.array(
             [
                 [math.cos(angle / 2.0), -math.sin(angle / 2.0)],
                 [math.sin(angle / 2.0), math.cos(angle / 2.0)],
             ]
         )
-        np.testing.assert_allclose(rotation @ state, np.array([1.0, 0.0]), atol=1e-10)
+        np.testing.assert_allclose(rotation @ state, np.array([0.0, 1.0]), atol=1e-10)
         np.testing.assert_allclose(
             model.temperley_lieb_block(height),
             model.d * np.outer(state, state),

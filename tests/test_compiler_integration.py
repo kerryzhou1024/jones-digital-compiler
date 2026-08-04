@@ -100,12 +100,14 @@ def test_height_encoding_uses_the_minimum_zero_based_selector(level: int) -> Non
             model.projector_angle(height)
         )
         assert compiler.projector_alignment_angles[encoded_height] == pytest.approx(
-            -2.0 * model.projector_angle(height)
+            math.pi - 2.0 * model.projector_angle(height)
         )
 
     for encoded_height in range(level - 1, 1 << expected_width):
         assert compiler.projector_basis_angles[encoded_height] == 0.0
-        assert compiler.projector_alignment_angles[encoded_height] == 0.0
+        assert compiler.projector_alignment_angles[encoded_height] == pytest.approx(
+            math.pi
+        )
 
     circuit = compiler.level_2_braid_circuit("")
     assert circuit.metadata["height_encoding"] == "vertex_minus_one"
@@ -373,7 +375,7 @@ def test_default_k5_resources_and_metadata_regression() -> None:
     assert dict(compilation.level_2_multicontrolled.count_ops()) == {
         "cx": 20,
         "ry": 12,
-        "x": 5,
+        "x": 1,
         "h": 2,
         "p": 2,
         "mcphase": 2,
@@ -382,7 +384,7 @@ def test_default_k5_resources_and_metadata_regression() -> None:
     assert dict(compilation.level_3_single_control.count_ops()) == {
         "cx": 28,
         "ry": 12,
-        "x": 5,
+        "x": 1,
         "rz": 12,
         "h": 2,
         "crz": 2,
@@ -406,22 +408,22 @@ def test_default_k5_resources_and_metadata_regression() -> None:
     assert levels["Level 2"].compiler_policies["prefix_height_path_steps"] == 0
     assert levels["Level 2"].compiler_policies["height_encoding"] == "vertex_minus_one"
     assert levels["Level 1"].quantum_gate_count == 5
-    assert levels["Level 2"].quantum_gate_count == 43
-    assert levels["Level 3"].quantum_gate_count == 61
+    assert levels["Level 2"].quantum_gate_count == 39
+    assert levels["Level 3"].quantum_gate_count == 57
 
     baseline = AJLCompiler(
         AJLPathModel(2, 5),
         CompilerConfig(prefix_height=RecomputePrefixHeight()),
     ).compile_hadamard_test("s1^2", "10")
     baseline_levels = dict(compilation_info(baseline).reports)
-    assert sum(baseline.level_2_multicontrolled.count_ops().values()) == 44
-    assert sum(baseline.level_3_single_control.count_ops().values()) == 62
+    assert sum(baseline.level_2_multicontrolled.count_ops().values()) == 40
+    assert sum(baseline.level_3_single_control.count_ops().values()) == 58
     assert (
         baseline_levels["Level 2"].compiler_policies["prefix_height_strategy"]
         == "recompute"
     )
-    assert baseline_levels["Level 2"].quantum_gate_count == 43
-    assert baseline_levels["Level 3"].quantum_gate_count == 61
+    assert baseline_levels["Level 2"].quantum_gate_count == 39
+    assert baseline_levels["Level 3"].quantum_gate_count == 57
 
 
 def test_compilation_info_reports_one_column_per_compiler_level(capsys) -> None:

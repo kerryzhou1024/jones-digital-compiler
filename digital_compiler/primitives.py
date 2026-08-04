@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Literal
 
@@ -139,14 +140,37 @@ def append_rank_one_braid_phase(
     alpha = model.projector_angle(height)
     _, relative_angle = model.phase_angles(sign)
     controls = list(controls)
+    if alpha <= math.pi / 4.0:
+        parity, phase_target = left, right
+        alignment_angle = 2.0 * alpha
+        parity_check = (right, left)
+    else:
+        parity, phase_target = right, left
+        alignment_angle = math.pi - 2.0 * alpha
+        parity_check = (left, right)
 
-    circuit.cx(left, right)
-    append_controlled_rotation(circuit, "y", [right], left, -2.0 * alpha)
-    circuit.x(left)
-    append_phase_on_one(circuit, [*controls, right], left, relative_angle)
-    circuit.x(left)
-    append_controlled_rotation(circuit, "y", [right], left, 2.0 * alpha)
-    circuit.cx(left, right)
+    circuit.cx(*parity_check)
+    append_controlled_rotation(
+        circuit,
+        "y",
+        [parity],
+        phase_target,
+        alignment_angle,
+    )
+    append_phase_on_one(
+        circuit,
+        [*controls, parity],
+        phase_target,
+        relative_angle,
+    )
+    append_controlled_rotation(
+        circuit,
+        "y",
+        [parity],
+        phase_target,
+        -alignment_angle,
+    )
+    circuit.cx(*parity_check)
 
 
 def append_fixed_height_braid(
