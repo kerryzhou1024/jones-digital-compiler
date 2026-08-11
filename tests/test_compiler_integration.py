@@ -222,7 +222,12 @@ def test_hadamard_test_matches_dense_amplitude(part: str, height_policy) -> None
         probabilities = state.probabilities(qargs=[0])
         observed = float(probabilities[0] - probabilities[1])
         assert abs(observed - expected_component) < TOL
-    assert register_signature(compilation.level_1_varphi) == register_signature(
+    assert register_signature(compilation.level_1_varphi)[0] == (
+        ("ctrl", 1),
+        ("path", 2),
+        ("height", 2),
+    )
+    assert register_signature(
         compilation.level_2_multicontrolled
     ) == register_signature(compilation.level_3_single_control)
     assert_level_2_contract(compilation.level_2_multicontrolled)
@@ -373,7 +378,15 @@ def test_policy_injection_changes_workspace_dispatch_and_metadata() -> None:
 
     assert compiler.work_qubits == 2
     assert compiler.logical_qubits == 7
-    assert register_signature(compilation.level_1_varphi)[0][-1] == ("adder_work", 2)
+    assert register_signature(compilation.level_1_varphi)[0] == (
+        ("ctrl", 1),
+        ("path", 2),
+        ("height", 2),
+    )
+    assert register_signature(compilation.level_2_multicontrolled)[0][-1] == (
+        "adder_work",
+        2,
+    )
     metadata = compilation.level_3_single_control.metadata
     assert metadata["lowering_policies"]["mcx"] == "test_two_workspace_mcx"
     assert metadata["compiler_config"]["workspace_qubits"] == 2
@@ -386,15 +399,29 @@ def test_default_policy_uses_no_workspace_and_preserves_semantics() -> None:
 
     assert compiler.work_qubits == 0
     assert compiler.logical_qubits == 5
-    expected_registers = (
+    expected_level_1_registers = (
+        ("ctrl", 1),
+        ("path", 2),
+        ("height", 2),
+    )
+    expected_lowered_registers = (
         ("ctrl", 1),
         ("path", 2),
         ("height", 2),
         ("adder_work", 0),
     )
-    assert register_signature(compilation.level_1_varphi)[0] == expected_registers
-    assert register_signature(compilation.level_2_multicontrolled)[0] == expected_registers
-    assert register_signature(compilation.level_3_single_control)[0] == expected_registers
+    assert (
+        register_signature(compilation.level_1_varphi)[0]
+        == expected_level_1_registers
+    )
+    assert (
+        register_signature(compilation.level_2_multicontrolled)[0]
+        == expected_lowered_registers
+    )
+    assert (
+        register_signature(compilation.level_3_single_control)[0]
+        == expected_lowered_registers
+    )
     assert compilation.level_1_varphi.num_qubits == 5
     assert compilation.level_2_multicontrolled.num_qubits == 5
     assert compilation.level_3_single_control.num_qubits == 5
@@ -438,7 +465,12 @@ def test_clean_ancilla_policy_remains_available_as_an_opt_in() -> None:
 
     assert compiler.work_qubits == 0
     assert compiler.logical_qubits == 5
-    assert register_signature(compilation.level_1_varphi)[0][-1] == (
+    assert register_signature(compilation.level_1_varphi)[0] == (
+        ("ctrl", 1),
+        ("path", 2),
+        ("height", 2),
+    )
+    assert register_signature(compilation.level_2_multicontrolled)[0][-1] == (
         "adder_work",
         0,
     )

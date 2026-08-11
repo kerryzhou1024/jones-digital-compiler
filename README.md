@@ -75,6 +75,20 @@ Qiskit circuit drawings, display themselves in notebooks with `.display()`,
 forward common circuit attributes, and expose the raw Qiskit object as
 `.circuit`.
 
+Serial Level 1 is a lean semantic circuit: it contains the Hadamard control,
+path register, compact height register, grouped reversible prefix-`Adder`
+blocks, and local opaque controlled `varphi(sigma_i)` blocks. It does not carry
+workspace introduced by later lowering levels. Its notebook `.display()` uses
+symbolic path-wire notation; the underlying Qiskit circuit still prepares the
+selected concrete basis path.
+
+```python
+reference = JonesProblem("3 4 1", strands=5, k=5).circuit(
+    "10101", "real", circuit_level=1
+)
+reference.display()
+```
+
 `CompiledCircuit.info()` describes that one compiler-level logical circuit.
 It selects the gate-family vocabulary from the recorded compiler level,
 separates measurements from quantum gate totals, and retains exact Qiskit

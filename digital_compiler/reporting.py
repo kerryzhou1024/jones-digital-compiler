@@ -348,6 +348,8 @@ _ELEMENTARY_FAMILIES = {
 def _level_1_gate_family(operation: Gate) -> str:
     if operation.name.startswith("c_varphi_sigma_"):
         return "controlled varphi"
+    if operation.name.startswith("level_1_adder_"):
+        return "prefix Adder"
     return _ELEMENTARY_FAMILIES.get(operation.name, operation.name)
 
 

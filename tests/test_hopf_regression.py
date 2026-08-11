@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import pytest
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 from qiskit.quantum_info import Statevector
 
@@ -82,8 +83,13 @@ def test_fixed_height_hopf_uses_only_public_primitives() -> None:
         circuit.h(control[0])
         for generator in word.generators:
             if level == 1:
+                with pytest.deprecated_call():
+                    varphi = compiler.controlled_varphi_gate(
+                        generator,
+                        include_workspace=False,
+                    )
                 circuit.append(
-                    compiler.controlled_varphi_gate(generator, include_workspace=False),
+                    varphi,
                     [control[0], *path],
                 )
             else:

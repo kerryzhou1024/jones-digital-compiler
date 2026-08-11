@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Sequence
 from typing import Literal
 
@@ -289,6 +290,54 @@ class QuantumAdder:
         )
 
 
+class PrefixAdderGate(Gate):
+    """Opaque Level-1 block for one reversible prefix-height transition."""
+
+    def __init__(
+        self,
+        path_indices: Sequence[int],
+        height_qubits: int,
+        *,
+        inverse: bool = False,
+    ) -> None:
+        indices = tuple(int(index) for index in path_indices)
+        if not indices:
+            raise ValueError("a prefix Adder block needs at least one path qubit")
+        if any(index < 0 for index in indices):
+            raise ValueError("path indices must be nonnegative")
+        if any(right != left + 1 for left, right in zip(indices, indices[1:])):
+            raise ValueError("a prefix Adder block needs contiguous path indices")
+        if height_qubits < 1:
+            raise ValueError("a prefix Adder block needs at least one height qubit")
+
+        self.path_indices = indices
+        self.height_qubits = int(height_qubits)
+        self.is_inverse = bool(inverse)
+        direction = "minus" if self.is_inverse else "plus"
+        suffix = "_".join(str(index + 1) for index in indices)
+        label_indices = ",".join(str(index + 1) for index in indices)
+        dagger = "†" if self.is_inverse else ""
+        super().__init__(
+            f"level_1_adder_{direction}_{suffix}",
+            len(indices) + self.height_qubits,
+            [],
+            label=f"Adder{dagger}[{label_indices}]",
+        )
+
+    def _define(self) -> None:
+        definition = QuantumCircuit(self.num_qubits, name=self.name)
+        path = definition.qubits[: len(self.path_indices)]
+        height = definition.qubits[len(self.path_indices) :]
+        adder = QuantumAdder(self.height_qubits)
+        if self.is_inverse:
+            for bit in reversed(path):
+                adder.subtract_path_step(definition, bit, height)
+        else:
+            for bit in path:
+                adder.add_path_step(definition, bit, height)
+        self.definition = definition
+
+
 def prepare_basis_path(circuit: QuantumCircuit, path_register, path_bits: Sequence[int]) -> None:
     for position, bit in enumerate(path_bits):
         if bit == 1:
@@ -312,7 +361,26 @@ def controlled_varphi_gate(
     generator: BraidGenerator,
     target_qubits: int,
 ) -> ControlledGate:
-    """Create the readable opaque Level-1 controlled AJL block."""
+    """Create the legacy full-target opaque controlled AJL block.
+
+    New Level-1 circuits use :func:`local_controlled_varphi_gate`. This helper
+    remains temporarily for callers that construct their own macro circuits.
+    """
+
+    warnings.warn(
+        "controlled_varphi_gate(target_qubits=...) is deprecated; "
+        "Level-1 compilation now constructs local varphi blocks",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    return _controlled_varphi_gate(generator, target_qubits)
+
+
+def _controlled_varphi_gate(
+    generator: BraidGenerator,
+    target_qubits: int,
+) -> ControlledGate:
 
     sign_name = "plus" if generator.sign == 1 else "minus"
     operation_name = f"c_varphi_sigma_{generator.index}_{sign_name}"
@@ -332,3 +400,14 @@ def controlled_varphi_gate(
         num_ctrl_qubits=1,
         base_gate=base,
     )
+
+
+def local_controlled_varphi_gate(
+    generator: BraidGenerator,
+    height_qubits: int,
+) -> ControlledGate:
+    """Create an opaque Level-1 block on one local path pair and height lane."""
+
+    if height_qubits < 1:
+        raise ValueError("a local varphi block needs at least one height qubit")
+    return _controlled_varphi_gate(generator, 2 + int(height_qubits))

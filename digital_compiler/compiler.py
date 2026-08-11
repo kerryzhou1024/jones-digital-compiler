@@ -23,11 +23,14 @@ from .policies import (
     GeneratorSchedule,
     PrefixHeightPlan,
     PrefixHeightTransition,
+    RoutedGenerator,
 )
 from .primitives import (
+    PrefixAdderGate,
     QuantumAdder,
     append_hadamard_readout,
     controlled_varphi_gate,
+    local_controlled_varphi_gate,
     prepare_basis_path,
 )
 
@@ -71,9 +74,38 @@ class HadamardTestCompilation:
         ]
         if self.level_4_clifford_t is not None:
             circuits.append(self.level_4_clifford_t)
-        signatures = {register_signature(circuit) for circuit in circuits}
-        if len(signatures) != 1:
-            raise ValueError("compiler levels must have identical register layouts")
+        core_signatures = {
+            (
+                tuple(
+                    (register.name, register.size)
+                    for register in circuit.qregs
+                    if register.name in {"ctrl", "path"}
+                ),
+                tuple((register.name, register.size) for register in circuit.cregs),
+            )
+            for circuit in circuits
+        }
+        if len(core_signatures) != 1:
+            raise ValueError(
+                "compiler levels must share control, path, and measurement registers"
+            )
+        expected_path_size = len(self.initial_path)
+        for circuit in circuits:
+            path_registers = [
+                register for register in circuit.qregs if register.name == "path"
+            ]
+            control_registers = [
+                register for register in circuit.qregs if register.name == "ctrl"
+            ]
+            if (
+                len(path_registers) != 1
+                or path_registers[0].size != expected_path_size
+                or len(control_registers) != 1
+                or control_registers[0].size != 1
+            ):
+                raise ValueError(
+                    "compiler levels must contain one matching path register and control"
+                )
         if (self.level_4_clifford_t is None) != (
             self.level_4_resources is None
         ):
@@ -228,6 +260,16 @@ class AJLCompiler:
         circuit = QuantumCircuit(*registers, measurement, name=name)
         fanout_qubits = [] if control_fanout is None else list(control_fanout)
         return circuit, control, path, height, work, fanout_qubits, measurement
+
+    def _new_level_1_hadamard_circuit(self, name: str):
+        """Build a semantic circuit without lower-level workspace registers."""
+
+        control = QuantumRegister(1, "ctrl")
+        path = QuantumRegister(self.strands, "path")
+        height = QuantumRegister(self.height_register_qubits, "height")
+        measurement = ClassicalRegister(1, "meas")
+        circuit = QuantumCircuit(control, path, height, measurement, name=name)
+        return circuit, control, path, height, measurement
 
     def _new_braid_circuit(self, name: str, controlled: bool = False):
         registers = []
@@ -483,6 +525,8 @@ class AJLCompiler:
         generator: BraidGenerator,
         include_workspace: bool = True,
     ):
+        """Return the deprecated full-register macro block for compatibility."""
+
         workspace_qubits = (
             self.height_register_qubits + self.work_qubits
             if include_workspace
@@ -553,34 +597,89 @@ class AJLCompiler:
         lane_controls=(),
     ) -> None:
         controls = list(lane_controls)
-        for layer in plan.layers:
-            for transition in layer.before:
+        for event in self._plan_events(plan):
+            if isinstance(event, PrefixHeightTransition):
                 self._transition_prefix_height(
                     circuit,
                     path,
-                    self._height_lane(height, transition.lane),
-                    transition.source_index,
-                    transition.target_index,
+                    self._height_lane(height, event.lane),
+                    event.source_index,
+                    event.target_index,
                 )
-
-            for item in layer.generators:
-                experiment_control = None if not controls else controls[item.lane]
+            else:
+                if not isinstance(event, RoutedGenerator):
+                    raise TypeError("a prefix-height plan contains an unknown event")
+                experiment_control = None if not controls else controls[event.lane]
                 self._append_height_selected_generator(
                     circuit,
                     path,
-                    self._height_lane(height, item.lane),
-                    word.generators[item.position],
+                    self._height_lane(height, event.lane),
+                    word.generators[event.position],
                     experiment_control,
                 )
 
-            for transition in layer.after:
-                self._transition_prefix_height(
-                    circuit,
-                    path,
-                    self._height_lane(height, transition.lane),
-                    transition.source_index,
-                    transition.target_index,
+    @staticmethod
+    def _plan_events(plan: PrefixHeightPlan):
+        for layer in plan.layers:
+            yield from layer.before
+            yield from layer.generators
+            yield from layer.after
+
+    @staticmethod
+    def _transition_path_indices(
+        transition: PrefixHeightTransition,
+    ) -> tuple[tuple[int, ...], bool]:
+        source = transition.source_index
+        target = transition.target_index
+        if source is None:
+            assert target is not None
+            return tuple(range(target - 1)), False
+        if target is None:
+            return tuple(range(source - 1)), True
+        if target > source:
+            return tuple(range(source - 1, target - 1)), False
+        return tuple(range(target - 1, source - 1)), True
+
+    def _append_level_1_plan(
+        self,
+        circuit,
+        control,
+        path,
+        height,
+        word: BraidWord,
+        plan: PrefixHeightPlan,
+    ) -> None:
+        for event in self._plan_events(plan):
+            height_lane = self._height_lane(height, event.lane)
+            if isinstance(event, PrefixHeightTransition):
+                path_indices, inverse = self._transition_path_indices(event)
+                if not path_indices:
+                    continue
+                circuit.append(
+                    PrefixAdderGate(
+                        path_indices,
+                        self.height_selector_qubits,
+                        inverse=inverse,
+                    ),
+                    [*(path[index] for index in path_indices), *height_lane],
                 )
+                continue
+
+            if not isinstance(event, RoutedGenerator):
+                raise TypeError("a prefix-height plan contains an unknown event")
+            generator = word.generators[event.position]
+            circuit.append(
+                local_controlled_varphi_gate(
+                    generator,
+                    self.height_selector_qubits,
+                ),
+                [
+                    control,
+                    path[generator.index - 1],
+                    path[generator.index],
+                    *height_lane,
+                ],
+            )
 
     def lower_to_level_3(self, level_2_circuit: QuantumCircuit) -> QuantumCircuit:
         return self.lowerer.lower(level_2_circuit)
@@ -716,18 +815,12 @@ class AJLCompiler:
         )
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
-        (
-            circuit,
-            control,
-            path,
-            height,
-            work,
-            _,
-            measurement,
-        ) = self._new_hadamard_circuit(f"level_1_varphi_{part}")
+        circuit, control, path, height, measurement = (
+            self._new_level_1_hadamard_circuit(f"level_1_varphi_{part}")
+        )
         circuit.metadata = {
             "compiler_level": 1,
-            "gate_contract": "ajl_varphi_blocks",
+            "gate_contract": "ajl_level_1_semantic_blocks",
             "compiler_config": self._config_metadata(),
             **self._schedule_metadata(
                 braid_word,
@@ -738,11 +831,14 @@ class AJLCompiler:
         }
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
-        for generator in braid_word.generators:
-            circuit.append(
-                self.controlled_varphi_gate(generator),
-                [control[0], *path, *height, *work],
-            )
+        self._append_level_1_plan(
+            circuit,
+            control[0],
+            path,
+            height,
+            braid_word,
+            prefix_height_plan,
+        )
         append_hadamard_readout(
             circuit,
             control[0],
