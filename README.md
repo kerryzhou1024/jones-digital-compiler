@@ -293,6 +293,24 @@ from digital_compiler import CompilerConfig, RecomputePrefixHeight
 baseline = CompilerConfig(prefix_height=RecomputePrefixHeight())
 ```
 
+Complete basis-path Hadamard-test components retain their final computed
+height selectors by default. This omits only the terminal unload after the
+last generator; intermediate lane cleanup is unchanged. The component is
+therefore terminal: its control expectation remains valid, but its path and
+height registers must not be reused coherently. Request the former clean
+component boundary explicitly when needed:
+
+```python
+from digital_compiler import CompilerConfig, UncomputeFinalHeight
+
+clean_components = CompilerConfig(final_height=UncomputeFinalHeight())
+```
+
+The standalone `AJLCompiler.level_*_braid_circuit()` builders always uncompute
+their final heights, regardless of this component policy, so they remain clean
+and composable. Discard or reset costs for retained component registers are
+outside the compiler's logical gate counts.
+
 ## Parallel Generator Scheduling
 
 Scheduling is independently hot-swappable. The default
@@ -328,7 +346,8 @@ disjoint controls prepared by a logarithmic-depth CNOT tree. Clean-ancilla MCX
 workspace remains partitioned by lane. Registers are reused between layers and
 are uncomputed after use. Rolling prefix-height routing matches live selectors
 to the next layer by minimum movement distance, cleans unmatched lanes before
-the next layer, and cleans every lane after the final layer.
+the next layer, and produces a clean final route. The default terminal-component
+policy omits that route's final unloads as described above.
 
 Only generators satisfying `abs(i - j) >= 2` can share a layer, and the
 compiler validates that a custom scheduling policy neither loses generators

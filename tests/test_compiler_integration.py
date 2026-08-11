@@ -17,7 +17,9 @@ from digital_compiler import (
     Level3Policy,
     MultiplexedHeightSynthesis,
     RecomputePrefixHeight,
+    RetainFinalHeight,
     SwitchCaseHeightSynthesis,
+    UncomputeFinalHeight,
     circuit_gate_count_depth,
     compilation_info,
     level_1_varphi_names,
@@ -220,18 +222,131 @@ def test_hadamard_test_matches_dense_amplitude(part: str, height_policy) -> None
         probabilities = state.probabilities(qargs=[0])
         observed = float(probabilities[0] - probabilities[1])
         assert abs(observed - expected_component) < TOL
-        scratch_leakage = sum(
-            float(abs(amplitude) ** 2)
-            for index, amplitude in enumerate(state.data)
-            if (index >> (1 + compiler.strands)) != 0
-        )
-        assert math.sqrt(scratch_leakage) < TOL
-
     assert register_signature(compilation.level_1_varphi) == register_signature(
         compilation.level_2_multicontrolled
     ) == register_signature(compilation.level_3_single_control)
     assert_level_2_contract(compilation.level_2_multicontrolled)
     assert_level_3_contract(compilation.level_3_single_control)
+
+
+@pytest.mark.parametrize("part", ["real", "imag"])
+def test_default_component_retains_nontrivial_final_height(part: str) -> None:
+    model = AJLPathModel(3, 5)
+    compiler = AJLCompiler(model)
+    expected = DenseAJLReference(model).path_amplitude("2", "110")
+    expected_component = expected.real if part == "real" else expected.imag
+    readout_gates = int(part == "imag")
+    clean_dimension = 1 << (1 + model.strands)
+
+    for level, circuit, expected_count, expected_depth in (
+        (
+            2,
+            compiler.level_2_multicontrolled_circuit(
+                "2", "110", part, measure=False
+            ),
+            25 + readout_gates,
+            18,
+        ),
+        (
+            3,
+            compiler.level_3_single_control_circuit(
+                "2", "110", part, measure=False
+            ),
+            34 + readout_gates,
+            25,
+        ),
+    ):
+        state = Statevector.from_instruction(circuit)
+        probabilities = state.probabilities(qargs=[0])
+        observed = float(probabilities[0] - probabilities[1])
+
+        assert abs(observed - expected_component) < TOL
+        assert np.linalg.norm(state.data[clean_dimension:]) == pytest.approx(1.0)
+        assert sum(circuit.count_ops().values()) == expected_count
+        assert circuit.depth() == expected_depth
+        assert circuit.metadata["compiler_level"] == level
+        assert circuit.metadata["final_height_strategy"] == "retain"
+        assert circuit.metadata["prefix_height_unloads"] == 0
+        assert circuit.metadata["prefix_height_path_steps"] == 1
+
+
+@pytest.mark.parametrize("word", ["", "1"])
+def test_gate_free_final_height_needs_no_cleanup_gates(word: str) -> None:
+    model = AJLPathModel(2, 5)
+    retained = AJLCompiler(model).level_2_multicontrolled_circuit(
+        word,
+        "10",
+        measure=False,
+    )
+    uncomputed = AJLCompiler(
+        model,
+        CompilerConfig(final_height=UncomputeFinalHeight()),
+    ).level_2_multicontrolled_circuit(word, "10", measure=False)
+
+    assert retained.count_ops() == uncomputed.count_ops()
+    assert retained.depth() == uncomputed.depth()
+    assert retained.metadata["prefix_height_path_steps"] == 0
+    assert uncomputed.metadata["prefix_height_path_steps"] == 0
+
+
+def test_uncompute_final_height_restores_clean_component_boundary() -> None:
+    model = AJLPathModel(3, 5)
+    compiler = AJLCompiler(
+        model,
+        CompilerConfig(final_height=UncomputeFinalHeight()),
+    )
+    clean_dimension = 1 << (1 + model.strands)
+
+    for circuit, expected_count, expected_depth in (
+        (
+            compiler.level_2_multicontrolled_circuit(
+                "2", "110", "real", measure=False
+            ),
+            28,
+            19,
+        ),
+        (
+            compiler.level_3_single_control_circuit(
+                "2", "110", "real", measure=False
+            ),
+            37,
+            26,
+        ),
+    ):
+        state = Statevector.from_instruction(circuit)
+
+        assert np.linalg.norm(state.data[clean_dimension:]) < TOL
+        assert sum(circuit.count_ops().values()) == expected_count
+        assert circuit.depth() == expected_depth
+        assert circuit.metadata["final_height_strategy"] == "uncompute"
+        assert circuit.metadata["prefix_height_unloads"] == 1
+        assert circuit.metadata["prefix_height_path_steps"] == 2
+
+
+@pytest.mark.parametrize(
+    "final_height",
+    [RetainFinalHeight(), UncomputeFinalHeight()],
+)
+@pytest.mark.parametrize("level", [2, 3])
+@pytest.mark.parametrize("controlled", [False, True])
+def test_standalone_braid_circuits_always_clean_final_height(
+    final_height,
+    level: int,
+    controlled: bool,
+) -> None:
+    model = AJLPathModel(3, 5)
+    compiler = AJLCompiler(model, CompilerConfig(final_height=final_height))
+
+    assert_braid_matches_dense(
+        compiler,
+        DenseAJLReference(model),
+        "2",
+        level,
+        controlled,
+    )
+    circuit = braid_builder(compiler, level, controlled)("2")
+    assert circuit.metadata["final_height_strategy"] == "uncompute"
+    assert circuit.metadata["prefix_height_unloads"] == 1
 
 
 @dataclass(frozen=True)
@@ -343,8 +458,8 @@ def test_default_no_ancilla_policy_reduces_t_count_for_k17() -> None:
     default_t_count = default_counts.get("t", 0) + default_counts.get("tdg", 0)
     clean_t_count = clean_counts.get("t", 0) + clean_counts.get("tdg", 0)
 
-    assert default_t_count == 28
-    assert clean_t_count == 112
+    assert default_t_count == 14
+    assert clean_t_count == 56
     assert default_t_count < clean_t_count
 
 
@@ -402,9 +517,10 @@ def test_default_k5_resources_and_metadata_regression() -> None:
     }
     assert {report.logical_qubits for report in levels.values()} == {5}
     assert levels["Level 2"].compiler_policies["prefix_height_strategy"] == "rolling"
+    assert levels["Level 2"].compiler_policies["final_height_strategy"] == "retain"
     assert levels["Level 2"].compiler_policies["prefix_height_loads"] == 1
     assert levels["Level 2"].compiler_policies["prefix_height_moves"] == 0
-    assert levels["Level 2"].compiler_policies["prefix_height_unloads"] == 1
+    assert levels["Level 2"].compiler_policies["prefix_height_unloads"] == 0
     assert levels["Level 2"].compiler_policies["prefix_height_path_steps"] == 0
     assert levels["Level 2"].compiler_policies["height_encoding"] == "vertex_minus_one"
     assert levels["Level 1"].quantum_gate_count == 5

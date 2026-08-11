@@ -9,8 +9,10 @@ from digital_compiler import (
     CommutingLayerScheduling,
     CompilerConfig,
     RecomputePrefixHeight,
+    RetainFinalHeight,
     RollingPrefixHeight,
     SerialGeneratorScheduling,
+    UncomputeFinalHeight,
 )
 from digital_compiler.policies import (
     PrefixHeightLayerPlan,
@@ -44,6 +46,42 @@ def test_identity_and_single_generator_routes(policy) -> None:
         single.unloads,
         single.path_steps,
     ) == (1, 0, 1, 4)
+
+
+@pytest.mark.parametrize(
+    "prefix_policy",
+    [RollingPrefixHeight(), RecomputePrefixHeight()],
+)
+@pytest.mark.parametrize("word", ["", "1", "3"])
+def test_final_height_policies_only_change_terminal_unloads(
+    prefix_policy,
+    word: str,
+) -> None:
+    clean = serial_plan(prefix_policy, word, strands=4)
+    retained = RetainFinalHeight().finalize(clean)
+    uncomputed = UncomputeFinalHeight().finalize(clean)
+
+    assert uncomputed == clean
+    if not clean.layers:
+        assert retained == clean
+        return
+
+    terminal_steps = sum(
+        transition.path_steps for transition in clean.layers[-1].after
+    )
+    assert retained.layers[:-1] == clean.layers[:-1]
+    assert retained.layers[-1].before == clean.layers[-1].before
+    assert retained.layers[-1].generators == clean.layers[-1].generators
+    assert retained.layers[-1].after == ()
+    assert retained.unloads == clean.unloads - len(clean.layers[-1].after)
+    assert retained.path_steps == clean.path_steps - terminal_steps
+
+
+def test_default_final_height_policy_is_retain() -> None:
+    config = CompilerConfig()
+
+    assert config.final_height == RetainFinalHeight()
+    assert config.metadata()["final_height"] == {"name": "retain"}
 
 
 @pytest.mark.parametrize(

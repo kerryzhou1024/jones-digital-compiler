@@ -341,7 +341,7 @@ def test_parallel_level_3_matches_dense_across_synthesis_policies(
     "control_distribution",
     [SharedControl(), TreeControlFanout()],
 )
-def test_parallel_hadamard_test_matches_dense_and_cleans_scratch(
+def test_parallel_hadamard_test_matches_dense_with_retained_height(
     part: str,
     control_distribution,
 ) -> None:
@@ -353,8 +353,6 @@ def test_parallel_hadamard_test_matches_dense_and_cleans_scratch(
     compilation = compiler.compile_hadamard_test("1 -3", "1010", part)
     amplitude = DenseAJLReference(model).path_amplitude("1 -3", "1010")
     expected = amplitude.real if part == "real" else amplitude.imag
-    clean_dimension = 1 << (1 + model.strands)
-
     for circuit in (
         compilation.level_2_multicontrolled,
         compilation.level_3_single_control,
@@ -365,7 +363,8 @@ def test_parallel_hadamard_test_matches_dense_and_cleans_scratch(
         probabilities = state.probabilities(qargs=[0])
         observed = float(probabilities[0] - probabilities[1])
         assert abs(observed - expected) < TOL
-        assert np.linalg.norm(state.data[clean_dimension:]) < TOL
+        assert circuit.metadata["final_height_strategy"] == "retain"
+        assert circuit.metadata["prefix_height_unloads"] == 0
 
     assert register_signature(compilation.level_1_varphi) == register_signature(
         compilation.level_2_multicontrolled

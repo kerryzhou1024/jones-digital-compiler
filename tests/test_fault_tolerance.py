@@ -85,6 +85,8 @@ def test_level_4_preserves_registers_and_reports_resources() -> None:
         compilation.level_4_clifford_t
     ) == register_signature(compilation.level_3_single_control)
     assert_clifford_t_contract(compilation.level_4_clifford_t)
+    assert compilation.level_4_clifford_t.metadata["final_height_strategy"] == "retain"
+    assert compilation.level_4_clifford_t.metadata["prefix_height_unloads"] == 0
 
     resources = compilation.level_4_resources
     assert resources.logical_qubits == compilation.logical_qubits

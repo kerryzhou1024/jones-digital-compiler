@@ -72,9 +72,9 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         plat.quantum_gate_count,
         plat.quantum_gate_depth,
         plat.measurement_count,
-    ) == ("plat", "1010", 3, 7, 64, 50, 1)
-    assert plat.gate_families["CNOT"] == 32
-    assert plat.gate_families["X"] == 4
+    ) == ("plat", "1010", 3, 7, 61, 49, 1)
+    assert plat.gate_families["CNOT"] == 30
+    assert plat.gate_families["X"] == 3
     assert "T/Tdg" not in plat.gate_families
     assert plat.exact_gate_stats["rz"] == {"count": 12, "depth": 10}
 
@@ -148,11 +148,13 @@ def test_report_is_immutable_structured_and_has_deterministic_rich_output() -> N
     assert first_dict["compiler"]["height_encoding"] == "vertex_minus_one"
     assert first_dict["compiler"]["control_distribution"] == "shared"
     assert first_dict["compiler"]["prefix_height_strategy"] == "rolling"
+    assert first_dict["compiler"]["final_height_strategy"] == "retain"
     assert first_dict["compiler"]["prefix_height_loads"] == 1
     assert first_dict["compiler"]["prefix_height_moves"] == 0
-    assert first_dict["compiler"]["prefix_height_unloads"] == 1
+    assert first_dict["compiler"]["prefix_height_unloads"] == 0
     assert first_dict["compiler"]["prefix_height_path_steps"] == 0
     assert "not the complete closure workload" in str(report)
+    assert "terminal basis-path Hadamard-test component" in str(report)
     assert "not a final Clifford+T estimate" in report._repr_html_()
     assert str(report) == str(report)
 

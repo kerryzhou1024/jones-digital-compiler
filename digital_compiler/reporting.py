@@ -480,6 +480,7 @@ def _compiler_policy_summary(
         "generator_scheduling": metadata.get("generator_scheduling"),
         "control_distribution": metadata.get("control_distribution"),
         "prefix_height_strategy": metadata.get("prefix_height_strategy"),
+        "final_height_strategy": metadata.get("final_height_strategy"),
         "prefix_height_loads": metadata.get("prefix_height_loads"),
         "prefix_height_moves": metadata.get("prefix_height_moves"),
         "prefix_height_unloads": metadata.get("prefix_height_unloads"),
@@ -524,6 +525,11 @@ def circuit_info(compiled: CompiledCircuit) -> CircuitInfo:
         "Single compiler-level logical circuit; not the complete closure workload.",
         "Before backend transpilation and physical or surface-code mapping.",
     ]
+    if (circuit.metadata or {}).get("final_height_strategy") == "retain":
+        scope_notes.append(
+            "Final height selectors are retained and may remain entangled; "
+            "treat this as a terminal basis-path Hadamard-test component."
+        )
     if compiled.circuit_level == 3:
         scope_notes.append(
             "Arbitrary rotations remain unsynthesized; this is not a final "

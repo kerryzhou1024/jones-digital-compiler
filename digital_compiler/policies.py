@@ -100,6 +100,70 @@ class PrefixHeightPlan:
         return sum(transition.path_steps for transition in self.transitions)
 
 
+class FinalHeightPolicy(Protocol):
+    """Strategy for the live height selectors at a component boundary."""
+
+    name: str
+
+    @property
+    def clean_at_completion(self) -> bool: ...
+
+    def finalize(self, plan: PrefixHeightPlan) -> PrefixHeightPlan: ...
+
+    def metadata(self) -> dict[str, object]: ...
+
+
+@dataclass(frozen=True)
+class RetainFinalHeight:
+    """Leave final height selectors computed in terminal components."""
+
+    name: str = "retain"
+
+    @property
+    def clean_at_completion(self) -> bool:
+        return False
+
+    def finalize(self, plan: PrefixHeightPlan) -> PrefixHeightPlan:
+        if not plan.layers:
+            return plan
+
+        last = plan.layers[-1]
+        if any(transition.target_index is not None for transition in last.after):
+            raise ValueError(
+                "terminal prefix-height transitions must only unload live lanes"
+            )
+        return PrefixHeightPlan(
+            (
+                *plan.layers[:-1],
+                PrefixHeightLayerPlan(
+                    before=last.before,
+                    generators=last.generators,
+                ),
+            )
+        )
+
+    def metadata(self) -> dict[str, object]:
+        return {"name": self.name}
+
+
+@dataclass(frozen=True)
+class UncomputeFinalHeight:
+    """Return final height selectors to zero in terminal components."""
+
+    name: str = "uncompute"
+
+    @property
+    def clean_at_completion(self) -> bool:
+        return True
+
+    @staticmethod
+    def finalize(plan: PrefixHeightPlan) -> PrefixHeightPlan:
+        return plan
+
+    def metadata(self) -> dict[str, object]:
+        return {"name": self.name}
+
+
 class PrefixHeightPolicy(Protocol):
     """Strategy for routing prefix heights through scheduled generator layers."""
 
@@ -1017,6 +1081,7 @@ class CompilerConfig:
     )
     prefix_height: PrefixHeightPolicy = field(default_factory=RollingPrefixHeight)
     level4: CliffordTConfig | None = None
+    final_height: FinalHeightPolicy = field(default_factory=RetainFinalHeight)
 
     def metadata(self) -> dict[str, object]:
         return {
@@ -1026,4 +1091,5 @@ class CompilerConfig:
             "control_distribution": self.control_distribution.metadata(),
             "prefix_height": self.prefix_height.metadata(),
             "level_4": None if self.level4 is None else self.level4.metadata(),
+            "final_height": self.final_height.metadata(),
         }

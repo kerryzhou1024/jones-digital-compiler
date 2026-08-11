@@ -19,6 +19,7 @@ from .lowering import SingleControlLowerer, assert_level_2_contract
 from .model import AJLPathModel, BraidGenerator, BraidWord, HadamardPart
 from .policies import (
     CompilerConfig,
+    FinalHeightPolicy,
     GeneratorSchedule,
     PrefixHeightPlan,
     PrefixHeightTransition,
@@ -340,6 +341,7 @@ class AJLCompiler:
         word: BraidWord,
         schedule: GeneratorSchedule,
         prefix_height_plan: PrefixHeightPlan,
+        final_height_strategy: str,
     ) -> dict[str, object]:
         signed_layers = tuple(
             tuple(word.generators[position].signed_index for position in layer)
@@ -355,6 +357,7 @@ class AJLCompiler:
             "height_selector_qubits": self.height_selector_qubits,
             "workspace_qubits_per_lane": self.work_qubits_per_lane,
             "prefix_height_strategy": self.config.prefix_height.name,
+            "final_height_strategy": final_height_strategy,
             "prefix_height_loads": prefix_height_plan.loads,
             "prefix_height_moves": prefix_height_plan.moves,
             "prefix_height_unloads": prefix_height_plan.unloads,
@@ -370,6 +373,7 @@ class AJLCompiler:
         self,
         word: BraidWord,
         schedule: GeneratorSchedule,
+        final_height: FinalHeightPolicy | None = None,
     ) -> PrefixHeightPlan:
         plan = self.config.prefix_height.route(
             word,
@@ -377,13 +381,25 @@ class AJLCompiler:
             self.parallel_lanes,
         )
         self._validate_prefix_height_plan(word, schedule, plan)
-        return plan
+        if final_height is None:
+            return plan
+
+        finalized = final_height.finalize(plan)
+        self._validate_prefix_height_plan(
+            word,
+            schedule,
+            finalized,
+            require_clean_completion=final_height.clean_at_completion,
+        )
+        return finalized
 
     def _validate_prefix_height_plan(
         self,
         word: BraidWord,
         schedule: GeneratorSchedule,
         plan: PrefixHeightPlan,
+        *,
+        require_clean_completion: bool = True,
     ) -> None:
         if not isinstance(plan, PrefixHeightPlan):
             raise ValueError("a prefix-height policy must return a PrefixHeightPlan")
@@ -459,7 +475,7 @@ class AJLCompiler:
             for transition in routed_layer.after:
                 apply_transition(transition)
 
-        if any(index is not None for index in lane_state):
+        if require_clean_completion and any(index is not None for index in lane_state):
             raise ValueError("a prefix-height plan must clean every lane at completion")
 
     def controlled_varphi_gate(
@@ -601,6 +617,7 @@ class AJLCompiler:
                 braid_word,
                 schedule,
                 prefix_height_plan,
+                "uncompute",
             ),
         }
         self._append_logical_plan(
@@ -634,6 +651,7 @@ class AJLCompiler:
                 braid_word,
                 schedule,
                 prefix_height_plan,
+                "uncompute",
             ),
         }
         active_width = max((len(layer) for layer in schedule), default=0)
@@ -691,7 +709,11 @@ class AJLCompiler:
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
         schedule = self._schedule(braid_word)
-        prefix_height_plan = self._prefix_height_plan(braid_word, schedule)
+        prefix_height_plan = self._prefix_height_plan(
+            braid_word,
+            schedule,
+            self.config.final_height,
+        )
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
         (
@@ -711,6 +733,7 @@ class AJLCompiler:
                 braid_word,
                 schedule,
                 prefix_height_plan,
+                self.config.final_height.name,
             ),
         }
         prepare_basis_path(circuit, path, path_bits)
@@ -737,7 +760,11 @@ class AJLCompiler:
     ) -> QuantumCircuit:
         braid_word = self.model.as_braid_word(word)
         schedule = self._schedule(braid_word)
-        prefix_height_plan = self._prefix_height_plan(braid_word, schedule)
+        prefix_height_plan = self._prefix_height_plan(
+            braid_word,
+            schedule,
+            self.config.final_height,
+        )
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
         policy_name = self.config.height.name
@@ -759,6 +786,7 @@ class AJLCompiler:
                 braid_word,
                 schedule,
                 prefix_height_plan,
+                self.config.final_height.name,
             ),
         }
         prepare_basis_path(circuit, path, path_bits)
