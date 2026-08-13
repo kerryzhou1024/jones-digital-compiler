@@ -366,10 +366,12 @@ def test_parallel_hadamard_test_matches_dense_with_retained_height(
         assert circuit.metadata["final_height_strategy"] == "retain"
         assert circuit.metadata["prefix_height_unloads"] == 0
 
-    assert register_signature(compilation.level_1_varphi)[0] == (
-        ("ctrl", 1),
-        ("path", 4),
-        ("height", 4),
+    expected_level_1_registers = [("ctrl", 1)]
+    if isinstance(control_distribution, TreeControlFanout):
+        expected_level_1_registers.append(("ctrl_fanout", 1))
+    expected_level_1_registers.extend((("path", 4), ("height", 4)))
+    assert register_signature(compilation.level_1_varphi)[0] == tuple(
+        expected_level_1_registers
     )
     assert register_signature(
         compilation.level_2_multicontrolled
@@ -499,12 +501,14 @@ def test_explicit_tree_fanout_preserves_the_former_parallel_layout() -> None:
     compilation = compiler.compile_hadamard_test("1 3", "1010")
 
     assert compiler.control_fanout_qubits == 1
-    assert compilation.logical_qubits == 9
+    assert compilation.logical_qubits == 10
     assert register_signature(compilation.level_1_varphi)[0] == (
         ("ctrl", 1),
+        ("ctrl_fanout", 1),
         ("path", 4),
         ("height", 4),
     )
+    assert compilation.level_1_varphi.count_ops().get("cx", 0) == 2
     assert register_signature(
         compilation.level_2_multicontrolled
     ) == register_signature(compilation.level_3_single_control)

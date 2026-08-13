@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from itertools import product
 
 import numpy as np
@@ -11,13 +12,15 @@ from digital_compiler import (
     AJLCompiler,
     AJLPathModel,
     CleanAncillaMCX,
+    CommutingLayerScheduling,
     CompilerConfig,
     DenseAJLReference,
     JonesProblem,
     Level3Policy,
+    TreeControlFanout,
     register_signature,
 )
-from digital_compiler.notebook import _level_1_serial_svg, show_scrollable_circuit
+from digital_compiler.notebook import _level_1_svg, show_scrollable_circuit
 from digital_compiler.primitives import PrefixAdderGate
 
 
@@ -193,7 +196,7 @@ def test_serial_svg_is_symbolic_exact_and_non_mutating(monkeypatch) -> None:
     original_counts = circuit.count_ops()
     original_depth = circuit.depth()
 
-    svg = _level_1_serial_svg(circuit)
+    svg = _level_1_svg(circuit)
 
     assert svg is not None
     for text in (
@@ -229,13 +232,173 @@ def test_serial_svg_is_symbolic_exact_and_non_mutating(monkeypatch) -> None:
     assert "Reference Level 1" in displayed[0].data
 
 
-def test_parallel_level_1_uses_the_qiskit_display_fallback() -> None:
-    from digital_compiler import CommutingLayerScheduling
+def test_parallel_tree_fanout_is_real_and_drawn_from_the_circuit() -> None:
+    config = CompilerConfig(
+        scheduling=CommutingLayerScheduling(),
+        control_distribution=TreeControlFanout(),
+    )
+    compiled = JonesProblem(
+        "1 3 2 4",
+        strands=5,
+        k=5,
+        config=config,
+    ).circuit(
+        "10101",
+        "real",
+        circuit_level=1,
+        measure=True,
+    )
+    circuit = compiled.circuit
 
-    config = CompilerConfig(scheduling=CommutingLayerScheduling(max_lanes=2))
-    circuit = AJLCompiler(AJLPathModel(4, 5), config).level_1_varphi_circuit(
-        "1 3",
-        "1010",
+    assert register_signature(circuit) == (
+        (("ctrl", 1), ("ctrl_fanout", 1), ("path", 5), ("height", 4)),
+        (("meas", 1),),
+    )
+    assert circuit.num_qubits == 11
+    semantic = [
+        instruction
+        for instruction in circuit.data
+        if instruction.operation.name != "x"
+    ]
+    assert [instruction.operation.name for instruction in semantic] == [
+        "h",
+        "cx",
+        "level_1_adder_plus_1_2",
+        "c_varphi_sigma_1_plus",
+        "c_varphi_sigma_3_plus",
+        "level_1_adder_plus_1",
+        "level_1_adder_plus_3",
+        "c_varphi_sigma_2_plus",
+        "c_varphi_sigma_4_plus",
+        "cx",
+        "h",
+        "measure",
+    ]
+    assert [
+        tuple(circuit.find_bit(qubit).index for qubit in instruction.qubits)
+        for instruction in semantic[1:10]
+    ] == [
+        (0, 1),
+        (2, 3, 9, 10),
+        (0, 2, 3, 7, 8),
+        (1, 4, 5, 9, 10),
+        (2, 7, 8),
+        (4, 9, 10),
+        (0, 3, 4, 7, 8),
+        (1, 5, 6, 9, 10),
+        (0, 1),
+    ]
+    assert (
+        circuit.depth(
+            lambda instruction: instruction.operation.name.startswith("c_varphi_")
+        )
+        == 2
+    )
+    assert compiled.info().gate_families["CNOT"] == 2
+
+    original_data = tuple(circuit.data)
+    original_metadata = dict(circuit.metadata)
+    original_counts = circuit.count_ops()
+    original_depth = circuit.depth()
+    svg = _level_1_svg(circuit)
+
+    assert svg is not None
+    for text in (
+        "|0⟩ f₁",
+        "|h₁⁽¹⁾⟩",
+        "|h₂⁽²⁾⟩",
+        "Layer 1: σ₁ ∥ σ₃",
+        "Layer 2: σ₂ ∥ σ₄",
+        "Adder₁,₂",
+        "Adder₁",
+        "Adder₃",
+        "φ(σ₁)",
+        "φ(σ₃)",
+        "φ(σ₂)",
+        "φ(σ₄)",
+    ):
+        assert text in svg
+    assert 'class="operation fanout-cnot"' in svg
+    assert 'class="operation unfanout-cnot"' in svg
+    assert 'data-lane="0"' in svg
+    assert 'data-lane="1"' in svg
+    assert "#c43d4b" in svg
+    assert "#2f6fdf" in svg
+    assert tuple(circuit.data) == original_data
+    assert circuit.metadata == original_metadata
+    assert circuit.count_ops() == original_counts
+    assert circuit.depth() == original_depth
+
+
+def test_four_lane_fanout_draws_one_control_with_three_targets() -> None:
+    config = CompilerConfig(
+        scheduling=CommutingLayerScheduling(),
+        control_distribution=TreeControlFanout(),
+    )
+    circuit = AJLCompiler(AJLPathModel(8, 5), config).level_1_varphi_circuit(
+        "1 3 5 7",
+        "10101010",
     )
 
-    assert _level_1_serial_svg(circuit) is None
+    svg = _level_1_svg(circuit)
+
+    assert svg is not None
+    fanout_macros = re.findall(
+        r'<g class="operation fanout-cnot">(.*?)</g>',
+        svg,
+    )
+    assert len(fanout_macros) == 1
+    assert fanout_macros[0].count('class="fanout-connector"') == 1
+    assert fanout_macros[0].count('class="fanout-control"') == 1
+    assert fanout_macros[0].count('class="fanout-target"') == 3
+
+
+def test_parallel_level_1_uses_no_idle_fanout_qubits() -> None:
+    tree_config = CompilerConfig(
+        scheduling=CommutingLayerScheduling(),
+        control_distribution=TreeControlFanout(),
+    )
+    compiler = AJLCompiler(AJLPathModel(4, 5), tree_config)
+
+    for word in ("", "1 2"):
+        circuit = compiler.level_1_varphi_circuit(word, "1010")
+        assert all(register.name != "ctrl_fanout" for register in circuit.qregs)
+        assert circuit.count_ops().get("cx", 0) == 0
+
+    shared = AJLCompiler(
+        AJLPathModel(4, 5),
+        CompilerConfig(scheduling=CommutingLayerScheduling()),
+    ).level_1_varphi_circuit("1 3", "1010")
+    assert all(register.name != "ctrl_fanout" for register in shared.qregs)
+    assert shared.count_ops().get("cx", 0) == 0
+
+
+def test_parallel_svg_handles_inverse_imaginary_unmeasured_circuit() -> None:
+    config = CompilerConfig(
+        scheduling=CommutingLayerScheduling(),
+        control_distribution=TreeControlFanout(),
+    )
+    circuit = AJLCompiler(AJLPathModel(4, 5), config).level_1_varphi_circuit(
+        "1 -3",
+        "1010",
+        part="imag",
+        measure=False,
+    )
+
+    svg = _level_1_svg(circuit)
+
+    assert svg is not None
+    assert "Layer 1: σ₁ ∥ σ₃⁻¹" in svg
+    assert "φ(σ₃⁻¹)" in svg
+    assert ">S†<" in svg
+    assert 'class="operation measure"' not in svg
+
+
+def test_malformed_parallel_level_1_uses_the_qiskit_display_fallback() -> None:
+    config = CompilerConfig(scheduling=CommutingLayerScheduling(max_lanes=2))
+    circuit = AJLCompiler(AJLPathModel(4, 5), config).level_1_varphi_circuit(
+        "1 3", "1010"
+    )
+    circuit.metadata["active_parallel_width"] = 1
+
+    assert _level_1_svg(circuit) is None

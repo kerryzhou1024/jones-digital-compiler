@@ -170,8 +170,18 @@ class AJLCompiler:
         if self.work_qubits_per_lane < 0:
             raise ValueError("an MCX policy cannot request negative workspace")
         self.work_qubits = self.work_qubits_per_lane * self.parallel_lanes
+        self.control_fanout_qubits = self._control_ancilla_count(self.parallel_lanes)
+        self.lowerer = SingleControlLowerer(self.config.level3)
+        (
+            self.projector_basis_angles,
+            self.projector_alignment_angles,
+        ) = self._build_projector_alignment_angles()
+
+    def _control_ancilla_count(self, lane_count: int) -> int:
+        if lane_count == 0:
+            return 0
         raw_control_ancillas = self.config.control_distribution.control_ancillas(
-            self.parallel_lanes
+            lane_count
         )
         if isinstance(raw_control_ancillas, bool):
             raise ValueError(
@@ -179,21 +189,17 @@ class AJLCompiler:
                 "integer number of ancillas"
             )
         try:
-            self.control_fanout_qubits = int(operator.index(raw_control_ancillas))
+            control_ancillas = int(operator.index(raw_control_ancillas))
         except TypeError:
             raise ValueError(
                 "a control distribution policy must request a nonnegative "
                 "integer number of ancillas"
             ) from None
-        if self.control_fanout_qubits < 0:
+        if control_ancillas < 0:
             raise ValueError(
                 "a control distribution policy cannot request negative ancillas"
             )
-        self.lowerer = SingleControlLowerer(self.config.level3)
-        (
-            self.projector_basis_angles,
-            self.projector_alignment_angles,
-        ) = self._build_projector_alignment_angles()
+        return control_ancillas
 
     def _build_projector_alignment_angles(
         self,
@@ -261,15 +267,26 @@ class AJLCompiler:
         fanout_qubits = [] if control_fanout is None else list(control_fanout)
         return circuit, control, path, height, work, fanout_qubits, measurement
 
-    def _new_level_1_hadamard_circuit(self, name: str):
+    def _new_level_1_hadamard_circuit(self, name: str, active_width: int):
         """Build a semantic circuit without lower-level workspace registers."""
 
         control = QuantumRegister(1, "ctrl")
+        active_fanout_qubits = self._control_ancilla_count(active_width)
+        control_fanout = (
+            QuantumRegister(active_fanout_qubits, "ctrl_fanout")
+            if active_fanout_qubits
+            else None
+        )
         path = QuantumRegister(self.strands, "path")
         height = QuantumRegister(self.height_register_qubits, "height")
         measurement = ClassicalRegister(1, "meas")
-        circuit = QuantumCircuit(control, path, height, measurement, name=name)
-        return circuit, control, path, height, measurement
+        registers = [control]
+        if control_fanout is not None:
+            registers.append(control_fanout)
+        registers.extend((path, height))
+        circuit = QuantumCircuit(*registers, measurement, name=name)
+        fanout_qubits = [] if control_fanout is None else list(control_fanout)
+        return circuit, control, fanout_qubits, path, height, measurement
 
     def _new_braid_circuit(self, name: str, controlled: bool = False):
         registers = []
@@ -643,12 +660,13 @@ class AJLCompiler:
     def _append_level_1_plan(
         self,
         circuit,
-        control,
+        lane_controls,
         path,
         height,
         word: BraidWord,
         plan: PrefixHeightPlan,
     ) -> None:
+        controls = list(lane_controls)
         for event in self._plan_events(plan):
             height_lane = self._height_lane(height, event.lane)
             if isinstance(event, PrefixHeightTransition):
@@ -674,7 +692,7 @@ class AJLCompiler:
                     self.height_selector_qubits,
                 ),
                 [
-                    control,
+                    controls[event.lane],
                     path[generator.index - 1],
                     path[generator.index],
                     *height_lane,
@@ -815,8 +833,12 @@ class AJLCompiler:
         )
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
-        circuit, control, path, height, measurement = (
-            self._new_level_1_hadamard_circuit(f"level_1_varphi_{part}")
+        active_width = max((len(layer) for layer in schedule), default=0)
+        circuit, control, control_fanout, path, height, measurement = (
+            self._new_level_1_hadamard_circuit(
+                f"level_1_varphi_{part}",
+                active_width,
+            )
         )
         circuit.metadata = {
             "compiler_level": 1,
@@ -831,13 +853,25 @@ class AJLCompiler:
         }
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
-        self._append_level_1_plan(
+        lane_controls = self.config.control_distribution.prepare(
             circuit,
             control[0],
+            control_fanout,
+            active_width,
+        )
+        self._append_level_1_plan(
+            circuit,
+            lane_controls,
             path,
             height,
             braid_word,
             prefix_height_plan,
+        )
+        self.config.control_distribution.unprepare(
+            circuit,
+            control[0],
+            control_fanout,
+            active_width,
         )
         append_hadamard_readout(
             circuit,
