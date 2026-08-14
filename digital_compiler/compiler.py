@@ -29,7 +29,6 @@ from .primitives import (
     PrefixAdderGate,
     QuantumAdder,
     append_hadamard_readout,
-    controlled_varphi_gate,
     local_controlled_varphi_gate,
     prepare_basis_path,
 )
@@ -40,6 +39,24 @@ LEVEL_4_STATUS = (
 
 CompilerLevel = Literal[1, 2, 3, 4]
 _HEIGHT_ENCODING = "vertex_minus_one"
+
+# Width attributes that lane right-sizing made word-dependent, and what each
+# caller should read instead.
+_REMOVED_WIDTH_ATTRIBUTES = {
+    "logical_qubits": "AJLCompiler.logical_qubits_for(word) or circuit.num_qubits",
+    "parallel_lanes": (
+        "AJLCompiler.lane_capacity for the budget, or "
+        "circuit.metadata['parallel_lanes'] for the lanes a word uses"
+    ),
+    "height_qubits": "AJLCompiler.height_selector_qubits",
+    "height_register_qubits": "circuit.metadata['compiler_config']['height_register_qubits']",
+    "work_qubits": (
+        "AJLCompiler.work_qubits_per_lane, or "
+        "circuit.metadata['compiler_config']['workspace_qubits']"
+    ),
+    "control_fanout_qubits": "circuit.metadata['compiler_config']['control_fanout_qubits']",
+    "controlled_varphi_gate": "digital_compiler.local_controlled_varphi_gate",
+}
 
 
 def register_signature(
@@ -67,13 +84,11 @@ class HadamardTestCompilation:
     level_4_status: str = LEVEL_4_STATUS
 
     def __post_init__(self) -> None:
-        circuits = [
-            self.level_1_varphi,
-            self.level_2_multicontrolled,
-            self.level_3_single_control,
-        ]
-        if self.level_4_clifford_t is not None:
-            circuits.append(self.level_4_clifford_t)
+        if (self.level_4_clifford_t is None) != (self.level_4_resources is None):
+            raise ValueError(
+                "Level 4 circuit and resource report must be provided together"
+            )
+        circuits = [circuit for _, circuit in self.levels]
         core_signatures = {
             (
                 tuple(
@@ -106,20 +121,29 @@ class HadamardTestCompilation:
                 raise ValueError(
                     "compiler levels must contain one matching path register and control"
                 )
-        if (self.level_4_clifford_t is None) != (
-            self.level_4_resources is None
-        ):
-            raise ValueError(
-                "Level 4 circuit and resource report must be provided together"
-            )
 
     @property
     def path_label(self) -> str:
         return "".join(str(bit) for bit in self.initial_path)
 
     @property
+    def levels(self) -> tuple[tuple[CompilerLevel, QuantumCircuit], ...]:
+        """Return every compiled level of this component in compiler order."""
+
+        levels: list[tuple[CompilerLevel, QuantumCircuit]] = [
+            (1, self.level_1_varphi),
+            (2, self.level_2_multicontrolled),
+            (3, self.level_3_single_control),
+        ]
+        if self.level_4_clifford_t is not None:
+            levels.append((4, self.level_4_clifford_t))
+        return tuple(levels)
+
+    @property
     def logical_qubits(self) -> int:
-        return self.level_1_varphi.num_qubits
+        """Return the width of the widest level; Level 1 carries no workspace."""
+
+        return max(circuit.num_qubits for _, circuit in self.levels)
 
     @property
     def height_policy_label(self) -> str:
@@ -136,6 +160,36 @@ class HadamardTestCompilation:
     @property
     def control_distribution_policy_label(self) -> str:
         return self.config.control_distribution.name
+
+
+@dataclass(frozen=True)
+class _Layout:
+    """The schedule, height route, and register widths of one braid word.
+
+    Lane-indexed registers are sized from the widest scheduled layer rather
+    than from the policy's lane budget, so a word that never runs two
+    generators together never pays for a second height lane.
+    """
+
+    word: BraidWord
+    schedule: GeneratorSchedule
+    plan: PrefixHeightPlan
+    strands: int
+    lanes: int
+    height_qubits: int
+    work_qubits_per_lane: int
+    work_qubits: int
+    fanout_qubits: int
+
+    @property
+    def logical_qubits(self) -> int:
+        return (
+            1
+            + self.strands
+            + self.height_qubits
+            + self.work_qubits
+            + self.fanout_qubits
+        )
 
 
 class AJLCompiler:
@@ -157,20 +211,16 @@ class AJLCompiler:
         self.level = model.level
         # Encode the k - 1 valid vertices h = 1, ..., k - 1 as h - 1.
         self.height_selector_qubits = (self.level - 2).bit_length()
-        self.height_qubits = self.height_selector_qubits
-        self.adder = QuantumAdder(self.height_qubits)
-        self.parallel_lanes = self._validate_lane_capacity(
+        self.adder = QuantumAdder(self.height_selector_qubits)
+        self.lane_capacity = self._validate_lane_capacity(
             self.config.scheduling.lane_capacity(self.strands)
         )
-        self.height_register_qubits = self.height_qubits * self.parallel_lanes
-        max_adder_controls = self.height_qubits - 1
+        max_adder_controls = self.height_selector_qubits - 1
         self.work_qubits_per_lane = int(
             self.config.level3.mcx.clean_ancillas(max_adder_controls)
         )
         if self.work_qubits_per_lane < 0:
             raise ValueError("an MCX policy cannot request negative workspace")
-        self.work_qubits = self.work_qubits_per_lane * self.parallel_lanes
-        self.control_fanout_qubits = self._control_ancilla_count(self.parallel_lanes)
         self.lowerer = SingleControlLowerer(self.config.level3)
         (
             self.projector_basis_angles,
@@ -211,14 +261,24 @@ class AJLCompiler:
             math.pi - 2.0 * angle for angle in basis_angles
         )
 
-    @property
-    def logical_qubits(self) -> int:
-        return (
-            1
-            + self.strands
-            + self.height_register_qubits
-            + self.work_qubits
-            + self.control_fanout_qubits
+    def logical_qubits_for(self, word: BraidWord | str | Sequence[int]) -> int:
+        """Return the Level-2 logical width required by one braid word."""
+
+        return self._layout(word).logical_qubits
+
+    def __getattr__(self, name: str):
+        # Register widths became word-dependent when lane allocation started
+        # following the schedule instead of the policy's lane budget. Returning
+        # a capacity-based number here would resurrect exactly the over-count
+        # that change removed, so these names fail with the migration instead.
+        replacement = _REMOVED_WIDTH_ATTRIBUTES.get(name)
+        if replacement is None:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}"
+            )
+        raise AttributeError(
+            f"AJLCompiler.{name} was removed because it is now word-dependent; "
+            f"use {replacement}"
         )
 
     def _validate_lane_capacity(self, raw_capacity: object) -> int:
@@ -238,25 +298,26 @@ class AJLCompiler:
             )
         return capacity
 
-    def _config_metadata(self) -> dict[str, object]:
+    def _config_metadata(self, layout: _Layout) -> dict[str, object]:
         metadata = self.config.metadata()
-        metadata["workspace_qubits"] = self.work_qubits
-        metadata["workspace_qubits_per_lane"] = self.work_qubits_per_lane
+        metadata["workspace_qubits"] = layout.work_qubits
+        metadata["workspace_qubits_per_lane"] = layout.work_qubits_per_lane
         metadata["height_encoding"] = _HEIGHT_ENCODING
         metadata["height_selector_qubits"] = self.height_selector_qubits
-        metadata["height_register_qubits"] = self.height_register_qubits
-        metadata["parallel_lanes"] = self.parallel_lanes
-        metadata["control_fanout_qubits"] = self.control_fanout_qubits
+        metadata["height_register_qubits"] = layout.height_qubits
+        metadata["lane_capacity"] = self.lane_capacity
+        metadata["parallel_lanes"] = layout.lanes
+        metadata["control_fanout_qubits"] = layout.fanout_qubits
         return metadata
 
-    def _new_hadamard_circuit(self, name: str):
+    def _new_hadamard_circuit(self, name: str, layout: _Layout):
         control = QuantumRegister(1, "ctrl")
         path = QuantumRegister(self.strands, "path")
-        height = QuantumRegister(self.height_register_qubits, "height")
-        work = QuantumRegister(self.work_qubits, "adder_work")
+        height = QuantumRegister(layout.height_qubits, "height")
+        work = QuantumRegister(layout.work_qubits, "adder_work")
         control_fanout = (
-            QuantumRegister(self.control_fanout_qubits, "ctrl_fanout")
-            if self.control_fanout_qubits
+            QuantumRegister(layout.fanout_qubits, "ctrl_fanout")
+            if layout.fanout_qubits
             else None
         )
         measurement = ClassicalRegister(1, "meas")
@@ -267,18 +328,17 @@ class AJLCompiler:
         fanout_qubits = [] if control_fanout is None else list(control_fanout)
         return circuit, control, path, height, work, fanout_qubits, measurement
 
-    def _new_level_1_hadamard_circuit(self, name: str, active_width: int):
+    def _new_level_1_hadamard_circuit(self, name: str, layout: _Layout):
         """Build a semantic circuit without lower-level workspace registers."""
 
         control = QuantumRegister(1, "ctrl")
-        active_fanout_qubits = self._control_ancilla_count(active_width)
         control_fanout = (
-            QuantumRegister(active_fanout_qubits, "ctrl_fanout")
-            if active_fanout_qubits
+            QuantumRegister(layout.fanout_qubits, "ctrl_fanout")
+            if layout.fanout_qubits
             else None
         )
         path = QuantumRegister(self.strands, "path")
-        height = QuantumRegister(self.height_register_qubits, "height")
+        height = QuantumRegister(layout.height_qubits, "height")
         measurement = ClassicalRegister(1, "meas")
         registers = [control]
         if control_fanout is not None:
@@ -288,7 +348,7 @@ class AJLCompiler:
         fanout_qubits = [] if control_fanout is None else list(control_fanout)
         return circuit, control, fanout_qubits, path, height, measurement
 
-    def _new_braid_circuit(self, name: str, controlled: bool = False):
+    def _new_braid_circuit(self, name: str, layout: _Layout, controlled: bool = False):
         registers = []
         control = None
         control_fanout = None
@@ -296,14 +356,11 @@ class AJLCompiler:
             control = QuantumRegister(1, "ctrl")
             registers.append(control)
         path = QuantumRegister(self.strands, "path")
-        height = QuantumRegister(self.height_register_qubits, "height")
-        work = QuantumRegister(self.work_qubits, "adder_work")
+        height = QuantumRegister(layout.height_qubits, "height")
+        work = QuantumRegister(layout.work_qubits, "adder_work")
         registers.extend([path, height, work])
-        if controlled and self.control_fanout_qubits:
-            control_fanout = QuantumRegister(
-                self.control_fanout_qubits,
-                "ctrl_fanout",
-            )
+        if controlled and layout.fanout_qubits:
+            control_fanout = QuantumRegister(layout.fanout_qubits, "ctrl_fanout")
             registers.append(control_fanout)
         circuit = QuantumCircuit(*registers, name=name)
         fanout_qubits = [] if control_fanout is None else list(control_fanout)
@@ -352,7 +409,7 @@ class AJLCompiler:
         word: BraidWord,
         schedule: GeneratorSchedule,
     ) -> None:
-        if any(len(layer) > self.parallel_lanes for layer in schedule):
+        if any(len(layer) > self.lane_capacity for layer in schedule):
             raise ValueError(
                 "a generator schedule layer exceeds the configured lane capacity"
             )
@@ -397,30 +454,40 @@ class AJLCompiler:
 
     def _schedule_metadata(
         self,
-        word: BraidWord,
-        schedule: GeneratorSchedule,
-        prefix_height_plan: PrefixHeightPlan,
+        layout: _Layout,
         final_height_strategy: str,
     ) -> dict[str, object]:
         signed_layers = tuple(
-            tuple(word.generators[position].signed_index for position in layer)
-            for layer in schedule
+            tuple(layout.word.generators[position].signed_index for position in layer)
+            for layer in layout.schedule
         )
+        plan = layout.plan
         return {
             "generator_scheduling": self.config.scheduling.name,
             "control_distribution": self.config.control_distribution.name,
             "generator_layers": signed_layers,
-            "parallel_lanes": self.parallel_lanes,
-            "active_parallel_width": max((len(layer) for layer in schedule), default=0),
+            "parallel_lanes": layout.lanes,
             "height_encoding": _HEIGHT_ENCODING,
             "height_selector_qubits": self.height_selector_qubits,
-            "workspace_qubits_per_lane": self.work_qubits_per_lane,
+            "workspace_qubits_per_lane": layout.work_qubits_per_lane,
             "prefix_height_strategy": self.config.prefix_height.name,
             "final_height_strategy": final_height_strategy,
-            "prefix_height_loads": prefix_height_plan.loads,
-            "prefix_height_moves": prefix_height_plan.moves,
-            "prefix_height_unloads": prefix_height_plan.unloads,
-            "prefix_height_path_steps": prefix_height_plan.path_steps,
+            "prefix_height_loads": plan.loads,
+            "prefix_height_moves": plan.moves,
+            "prefix_height_unloads": plan.unloads,
+            "prefix_height_path_steps": plan.path_steps,
+        }
+
+    def _circuit_metadata(
+        self,
+        layout: _Layout,
+        final_height_strategy: str,
+        **extra: object,
+    ) -> dict[str, object]:
+        return {
+            **extra,
+            "compiler_config": self._config_metadata(layout),
+            **self._schedule_metadata(layout, final_height_strategy),
         }
 
     def _height_lane(self, height, lane: int) -> list:
@@ -428,18 +495,46 @@ class AJLCompiler:
         stop = start + self.height_selector_qubits
         return list(height[start:stop])
 
+    def _layout(
+        self,
+        word: BraidWord | str | Sequence[int],
+        final_height: FinalHeightPolicy | None = None,
+    ) -> _Layout:
+        """Schedule one braid word and size its lane-indexed registers."""
+
+        braid_word = self.model.as_braid_word(word)
+        schedule = self._schedule(braid_word)
+        # Every valid plan keeps exactly one live lane per generator in a
+        # layer, so the widest layer is the peak lane occupancy.
+        lanes = max((len(layer) for layer in schedule), default=0)
+        plan = self._prefix_height_plan(braid_word, schedule, lanes, final_height)
+        # MCX workspace only exists to lower the prefix adders. A route with no
+        # path steps emits no adder -- every generator sits at index 1, whose
+        # prefix is empty -- so the register is not allocated at all. Workspace
+        # stays uniform per lane above that, so a lane that happens to route
+        # only index-1 generators still carries its (idle) share.
+        work_per_lane = self.work_qubits_per_lane if plan.path_steps else 0
+        return _Layout(
+            word=braid_word,
+            schedule=schedule,
+            plan=plan,
+            strands=self.strands,
+            lanes=lanes,
+            height_qubits=self.height_selector_qubits * lanes,
+            work_qubits_per_lane=work_per_lane,
+            work_qubits=work_per_lane * lanes,
+            fanout_qubits=self._control_ancilla_count(lanes),
+        )
+
     def _prefix_height_plan(
         self,
         word: BraidWord,
         schedule: GeneratorSchedule,
+        lanes: int,
         final_height: FinalHeightPolicy | None = None,
     ) -> PrefixHeightPlan:
-        plan = self.config.prefix_height.route(
-            word,
-            schedule,
-            self.parallel_lanes,
-        )
-        self._validate_prefix_height_plan(word, schedule, plan)
+        plan = self.config.prefix_height.route(word, schedule, lanes)
+        self._validate_prefix_height_plan(word, schedule, lanes, plan)
         if final_height is None:
             return plan
 
@@ -447,6 +542,7 @@ class AJLCompiler:
         self._validate_prefix_height_plan(
             word,
             schedule,
+            lanes,
             finalized,
             require_clean_completion=final_height.clean_at_completion,
         )
@@ -456,6 +552,7 @@ class AJLCompiler:
         self,
         word: BraidWord,
         schedule: GeneratorSchedule,
+        lanes: int,
         plan: PrefixHeightPlan,
         *,
         require_clean_completion: bool = True,
@@ -467,7 +564,7 @@ class AJLCompiler:
                 "a prefix-height plan must contain one route for each generator layer"
             )
 
-        lane_state: list[int | None] = [None] * self.parallel_lanes
+        lane_state: list[int | None] = [None] * lanes
 
         def apply_transition(transition: PrefixHeightTransition) -> None:
             lane = transition.lane
@@ -475,7 +572,7 @@ class AJLCompiler:
                 isinstance(lane, bool)
                 or not isinstance(lane, int)
                 or lane < 0
-                or lane >= self.parallel_lanes
+                or lane >= lanes
             ):
                 raise ValueError("a prefix-height transition has an invalid lane")
             if transition.source_index != lane_state[lane]:
@@ -503,8 +600,8 @@ class AJLCompiler:
                 raise ValueError(
                     "a prefix-height plan must preserve each scheduled generator layer"
                 )
-            lanes = tuple(item.lane for item in routed_layer.generators)
-            if len(set(lanes)) != len(lanes):
+            layer_lanes = tuple(item.lane for item in routed_layer.generators)
+            if len(set(layer_lanes)) != len(layer_lanes):
                 raise ValueError(
                     "a prefix-height plan cannot reuse one lane within a layer"
                 )
@@ -513,7 +610,7 @@ class AJLCompiler:
                     isinstance(item.lane, bool)
                     or not isinstance(item.lane, int)
                     or item.lane < 0
-                    or item.lane >= self.parallel_lanes
+                    or item.lane >= lanes
                 ):
                     raise ValueError("a routed generator has an invalid height lane")
                 expected_index = word.generators[item.position].index
@@ -522,7 +619,7 @@ class AJLCompiler:
                         "a routed generator does not have its required prefix height"
                     )
 
-            active_lanes = set(lanes)
+            active_lanes = set(layer_lanes)
             dirty_lanes = {
                 lane for lane, index in enumerate(lane_state) if index is not None
             }
@@ -536,20 +633,6 @@ class AJLCompiler:
 
         if require_clean_completion and any(index is not None for index in lane_state):
             raise ValueError("a prefix-height plan must clean every lane at completion")
-
-    def controlled_varphi_gate(
-        self,
-        generator: BraidGenerator,
-        include_workspace: bool = True,
-    ):
-        """Return the deprecated full-register macro block for compatibility."""
-
-        workspace_qubits = (
-            self.height_register_qubits + self.work_qubits
-            if include_workspace
-            else 0
-        )
-        return controlled_varphi_gate(generator, self.strands + workspace_qubits)
 
     def _compute_prefix_height(self, circuit, path, height, index: int) -> None:
         # The clean all-zero lane already encodes the initial AJL vertex h = 1.
@@ -699,8 +782,12 @@ class AJLCompiler:
                 ],
             )
 
-    def lower_to_level_3(self, level_2_circuit: QuantumCircuit) -> QuantumCircuit:
-        return self.lowerer.lower(level_2_circuit)
+    def lower_to_level_3(
+        self,
+        level_2_circuit: QuantumCircuit,
+        name: str | None = None,
+    ) -> QuantumCircuit:
+        return self.lowerer.lower(level_2_circuit, name)
 
     def lower_to_level_4(
         self,
@@ -713,109 +800,86 @@ class AJLCompiler:
             )
         return self._clifford_t_compiler.compile(level_3_circuit)
 
-    def level_2_braid_circuit(
+    def _braid_circuit(
         self,
         word: BraidWord | str | Sequence[int],
+        *,
+        controlled: bool,
     ) -> QuantumCircuit:
-        braid_word = self.model.as_braid_word(word)
-        schedule = self._schedule(braid_word)
-        prefix_height_plan = self._prefix_height_plan(braid_word, schedule)
+        """Build one standalone braid unitary with clean final heights."""
+
+        layout = self._layout(word)
         policy_name = self.config.height.name
-        circuit, _, path, height, _, _ = self._new_braid_circuit(
-            f"level_2_braid_{policy_name}({braid_word})",
-            controlled=False,
+        prefix = "controlled_" if controlled else ""
+        circuit, control, path, height, _, control_fanout = self._new_braid_circuit(
+            f"{prefix}level_2_braid_{policy_name}({layout.word})",
+            layout,
+            controlled=controlled,
         )
-        circuit.metadata = {
-            "compiler_level": 2,
-            "height_strategy": policy_name,
-            "gate_contract": "ajl_multicontrolled",
-            "compiler_config": self._config_metadata(),
-            **self._schedule_metadata(
-                braid_word,
-                schedule,
-                prefix_height_plan,
-                "uncompute",
-            ),
-        }
+        circuit.metadata = self._circuit_metadata(
+            layout,
+            "uncompute",
+            compiler_level=2,
+            height_strategy=policy_name,
+            gate_contract="ajl_multicontrolled",
+        )
+        lane_controls = ()
+        if controlled:
+            lane_controls = self.config.control_distribution.prepare(
+                circuit,
+                control[0],
+                control_fanout,
+                layout.lanes,
+            )
         self._append_logical_plan(
             circuit,
             path,
             height,
-            braid_word,
-            prefix_height_plan,
+            layout.word,
+            layout.plan,
+            lane_controls,
         )
+        if controlled:
+            self.config.control_distribution.unprepare(
+                circuit,
+                control[0],
+                control_fanout,
+                layout.lanes,
+            )
         assert_level_2_contract(circuit)
         return circuit
+
+    def level_2_braid_circuit(
+        self,
+        word: BraidWord | str | Sequence[int],
+    ) -> QuantumCircuit:
+        return self._braid_circuit(word, controlled=False)
 
     def controlled_level_2_braid_circuit(
         self,
         word: BraidWord | str | Sequence[int],
     ) -> QuantumCircuit:
-        braid_word = self.model.as_braid_word(word)
-        schedule = self._schedule(braid_word)
-        prefix_height_plan = self._prefix_height_plan(braid_word, schedule)
-        policy_name = self.config.height.name
-        circuit, control, path, height, _, control_fanout = self._new_braid_circuit(
-            f"controlled_level_2_braid_{policy_name}({braid_word})",
-            controlled=True,
-        )
-        circuit.metadata = {
-            "compiler_level": 2,
-            "height_strategy": policy_name,
-            "gate_contract": "ajl_multicontrolled",
-            "compiler_config": self._config_metadata(),
-            **self._schedule_metadata(
-                braid_word,
-                schedule,
-                prefix_height_plan,
-                "uncompute",
-            ),
-        }
-        active_width = max((len(layer) for layer in schedule), default=0)
-        lane_controls = self.config.control_distribution.prepare(
-            circuit,
-            control[0],
-            control_fanout,
-            active_width,
-        )
-        self._append_logical_plan(
-            circuit,
-            path,
-            height,
-            braid_word,
-            prefix_height_plan,
-            lane_controls,
-        )
-        self.config.control_distribution.unprepare(
-            circuit,
-            control[0],
-            control_fanout,
-            active_width,
-        )
-        assert_level_2_contract(circuit)
-        return circuit
+        return self._braid_circuit(word, controlled=True)
 
     def level_3_braid_circuit(
         self,
         word: BraidWord | str | Sequence[int],
     ) -> QuantumCircuit:
-        circuit = self.lower_to_level_3(self.level_2_braid_circuit(word))
-        circuit.name = circuit.name.replace(
-            "level_3_single_control(level_2",
-            "level_3",
-        )[:-1]
-        return circuit
+        level_2 = self.level_2_braid_circuit(word)
+        return self.lower_to_level_3(
+            level_2,
+            level_2.name.replace("level_2_braid", "level_3_braid"),
+        )
 
     def controlled_level_3_braid_circuit(
         self,
         word: BraidWord | str | Sequence[int],
     ) -> QuantumCircuit:
-        circuit = self.lower_to_level_3(self.controlled_level_2_braid_circuit(word))
-        circuit.name = circuit.name.replace(
-            "level_3_single_control(controlled_level_2",
-            "controlled_level_3",
-        )[:-1]
-        return circuit
+        level_2 = self.controlled_level_2_braid_circuit(word)
+        return self.lower_to_level_3(
+            level_2,
+            level_2.name.replace("level_2_braid", "level_3_braid"),
+        )
 
     def level_1_varphi_circuit(
         self,
@@ -824,54 +888,39 @@ class AJLCompiler:
         part: HadamardPart = "real",
         measure: bool = True,
     ) -> QuantumCircuit:
-        braid_word = self.model.as_braid_word(word)
-        schedule = self._schedule(braid_word)
-        prefix_height_plan = self._prefix_height_plan(
-            braid_word,
-            schedule,
-            self.config.final_height,
-        )
+        layout = self._layout(word, self.config.final_height)
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
-        active_width = max((len(layer) for layer in schedule), default=0)
         circuit, control, control_fanout, path, height, measurement = (
-            self._new_level_1_hadamard_circuit(
-                f"level_1_varphi_{part}",
-                active_width,
-            )
+            self._new_level_1_hadamard_circuit(f"level_1_varphi_{part}", layout)
         )
-        circuit.metadata = {
-            "compiler_level": 1,
-            "gate_contract": "ajl_level_1_semantic_blocks",
-            "compiler_config": self._config_metadata(),
-            **self._schedule_metadata(
-                braid_word,
-                schedule,
-                prefix_height_plan,
-                self.config.final_height.name,
-            ),
-        }
+        circuit.metadata = self._circuit_metadata(
+            layout,
+            self.config.final_height.name,
+            compiler_level=1,
+            gate_contract="ajl_level_1_semantic_blocks",
+        )
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
         lane_controls = self.config.control_distribution.prepare(
             circuit,
             control[0],
             control_fanout,
-            active_width,
+            layout.lanes,
         )
         self._append_level_1_plan(
             circuit,
             lane_controls,
             path,
             height,
-            braid_word,
-            prefix_height_plan,
+            layout.word,
+            layout.plan,
         )
         self.config.control_distribution.unprepare(
             circuit,
             control[0],
             control_fanout,
-            active_width,
+            layout.lanes,
         )
         append_hadamard_readout(
             circuit,
@@ -888,13 +937,7 @@ class AJLCompiler:
         part: HadamardPart = "real",
         measure: bool = True,
     ) -> QuantumCircuit:
-        braid_word = self.model.as_braid_word(word)
-        schedule = self._schedule(braid_word)
-        prefix_height_plan = self._prefix_height_plan(
-            braid_word,
-            schedule,
-            self.config.final_height,
-        )
+        layout = self._layout(word, self.config.final_height)
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
         policy_name = self.config.height.name
@@ -906,41 +949,38 @@ class AJLCompiler:
             _,
             control_fanout,
             measurement,
-        ) = self._new_hadamard_circuit(f"level_2_multicontrolled_{policy_name}_{part}")
-        circuit.metadata = {
-            "compiler_level": 2,
-            "height_strategy": policy_name,
-            "gate_contract": "ajl_multicontrolled",
-            "compiler_config": self._config_metadata(),
-            **self._schedule_metadata(
-                braid_word,
-                schedule,
-                prefix_height_plan,
-                self.config.final_height.name,
-            ),
-        }
+        ) = self._new_hadamard_circuit(
+            f"level_2_multicontrolled_{policy_name}_{part}",
+            layout,
+        )
+        circuit.metadata = self._circuit_metadata(
+            layout,
+            self.config.final_height.name,
+            compiler_level=2,
+            height_strategy=policy_name,
+            gate_contract="ajl_multicontrolled",
+        )
         prepare_basis_path(circuit, path, path_bits)
         circuit.h(control[0])
-        active_width = max((len(layer) for layer in schedule), default=0)
         lane_controls = self.config.control_distribution.prepare(
             circuit,
             control[0],
             control_fanout,
-            active_width,
+            layout.lanes,
         )
         self._append_logical_plan(
             circuit,
             path,
             height,
-            braid_word,
-            prefix_height_plan,
+            layout.word,
+            layout.plan,
             lane_controls,
         )
         self.config.control_distribution.unprepare(
             circuit,
             control[0],
             control_fanout,
-            active_width,
+            layout.lanes,
         )
         append_hadamard_readout(
             circuit,
@@ -964,12 +1004,16 @@ class AJLCompiler:
             part,
             measure=measure,
         )
-        level_3 = self.lower_to_level_3(level_2)
-        level_3.name = level_2.name.replace(
-            "level_2_multicontrolled",
-            "level_3_single_control",
+        return self._lower_component(level_2)
+
+    def _lower_component(self, level_2: QuantumCircuit) -> QuantumCircuit:
+        return self.lower_to_level_3(
+            level_2,
+            level_2.name.replace(
+                "level_2_multicontrolled",
+                "level_3_single_control",
+            ),
         )
-        return level_3
 
     def level_4_clifford_t_circuit(
         self,
@@ -1044,11 +1088,7 @@ class AJLCompiler:
             part,
             measure=measure,
         )
-        level_3 = self.lower_to_level_3(level_2)
-        level_3.name = level_2.name.replace(
-            "level_2_multicontrolled",
-            "level_3_single_control",
-        )
+        level_3 = self._lower_component(level_2)
         level_4 = (
             None
             if self._clifford_t_compiler is None

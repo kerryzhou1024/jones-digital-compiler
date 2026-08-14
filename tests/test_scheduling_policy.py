@@ -387,7 +387,6 @@ def test_parallel_clean_ancilla_workspace_is_partitioned_by_lane() -> None:
     work = next(register for register in level_3.qregs if register.name == "adder_work")
 
     assert compiler.work_qubits_per_lane == 1
-    assert compiler.work_qubits == 2
     assert work.size == 2
     assert all(
         any(qubit in instruction.qubits for instruction in level_3.data)
@@ -402,7 +401,7 @@ def test_identity_and_two_strands_degenerate_cleanly() -> None:
     serial_circuit = serial.level_2_multicontrolled_circuit("1 -1", "10")
     parallel_circuit = parallel.level_2_multicontrolled_circuit("1 -1", "10")
 
-    assert parallel.parallel_lanes == 1
+    assert parallel.lane_capacity == 1
     assert register_signature(serial_circuit) == register_signature(parallel_circuit)
     assert serial_circuit.count_ops() == parallel_circuit.count_ops()
     assert serial_circuit.depth() == parallel_circuit.depth()
@@ -414,7 +413,7 @@ def test_identity_and_two_strands_degenerate_cleanly() -> None:
         measure=False,
     )
     assert identity.metadata["generator_layers"] == ()
-    assert identity.metadata["active_parallel_width"] == 0
+    assert identity.metadata["parallel_lanes"] == 0
     assert identity.count_ops().get("cx", 0) == 0
     state = Statevector.from_instruction(identity)
     assert np.linalg.norm(state.data[1 << 5 :]) < TOL
@@ -473,10 +472,9 @@ def test_parallel_policy_reduces_sigma1_sigma3_depth_and_reports_schedule() -> N
         "Level 2"
     ].compiler_policies
 
-    assert parallel_compiler.parallel_lanes == 2
-    assert parallel_compiler.height_qubits == 2
-    assert parallel_compiler.height_register_qubits == 4
-    assert parallel_compiler.control_fanout_qubits == 0
+    assert parallel_compiler.lane_capacity == 2
+    assert parallel_compiler.height_selector_qubits == 2
+    assert parallel_compiler.logical_qubits_for("1 3") == 9
     assert parallel.logical_qubits == 9
     assert all(
         register.name != "ctrl_fanout"
@@ -490,7 +488,6 @@ def test_parallel_policy_reduces_sigma1_sigma3_depth_and_reports_schedule() -> N
     assert policies["prefix_height_strategy"] == "rolling"
     assert policies["generator_layers"] == ((1, 3),)
     assert policies["parallel_lanes"] == 2
-    assert policies["active_parallel_width"] == 2
 
 
 def test_explicit_tree_fanout_preserves_the_former_parallel_layout() -> None:
@@ -500,7 +497,7 @@ def test_explicit_tree_fanout_preserves_the_former_parallel_layout() -> None:
     )
     compilation = compiler.compile_hadamard_test("1 3", "1010")
 
-    assert compiler.control_fanout_qubits == 1
+    assert compiler.logical_qubits_for("1 3") == 10
     assert compilation.logical_qubits == 10
     assert register_signature(compilation.level_1_varphi)[0] == (
         ("ctrl", 1),
@@ -533,3 +530,61 @@ def test_parallel_level_2_and_level_3_are_equivalent() -> None:
 
     np.testing.assert_allclose(state_2.data, state_3.data, atol=TOL)
     assert math.sqrt(float(np.sum(np.abs(state_3.data[1 << 5 :]) ** 2))) < TOL
+
+
+def idle_qubits(circuit: QuantumCircuit) -> list[str]:
+    """Return the non-path qubits that no instruction ever touches."""
+
+    used = {qubit for instruction in circuit.data for qubit in instruction.qubits}
+    return [
+        circuit.find_bit(qubit).registers[0][0].name
+        for qubit in circuit.qubits
+        if qubit not in used
+        and circuit.find_bit(qubit).registers[0][0].name != "path"
+    ]
+
+
+@pytest.mark.parametrize(
+    "word",
+    ["", "1", "1 1 1", "1 3", "3 2 4 1", "1 3 5 2 4"],
+)
+@pytest.mark.parametrize("control_distribution", [SharedControl(), TreeControlFanout()])
+def test_lanes_are_allocated_from_the_schedule_not_the_capacity(
+    word: str,
+    control_distribution,
+) -> None:
+    config = parallel_config(control_distribution=control_distribution)
+    compiler = AJLCompiler(AJLPathModel(6, 5), config)
+    compilation = compiler.compile_hadamard_test(word, "101010", measure=False)
+    layers = compilation.level_2_multicontrolled.metadata["generator_layers"]
+    lanes = max((len(layer) for layer in layers), default=0)
+
+    assert compiler.lane_capacity == 3
+    for level, circuit in compilation.levels:
+        assert circuit.metadata["parallel_lanes"] == lanes, level
+        height = next(
+            register for register in circuit.qregs if register.name == "height"
+        )
+        assert height.size == lanes * compiler.height_selector_qubits, level
+        assert idle_qubits(circuit) == [], level
+
+
+def test_capping_lanes_at_the_schedule_width_changes_nothing_but_qubits() -> None:
+    # A word that only ever reaches two lanes must compile identically under a
+    # two-lane cap and an uncapped policy: same schedule, same gates, same
+    # depth, and no phantom third lane in the uncapped report.
+    word = "3 2 4 1"
+    capped, uncapped = (
+        AJLCompiler(AJLPathModel(6, 5), parallel_config(max_lanes=lanes))
+        .compile_hadamard_test(word, "101010", measure=False)
+        .level_3_single_control
+        for lanes in (2, None)
+    )
+
+    assert capped.metadata["generator_layers"] == uncapped.metadata["generator_layers"]
+    assert capped.metadata["parallel_lanes"] == 2
+    assert uncapped.metadata["parallel_lanes"] == 2
+    assert uncapped.metadata["compiler_config"]["lane_capacity"] == 3
+    assert capped.count_ops() == uncapped.count_ops()
+    assert capped.depth() == uncapped.depth()
+    assert capped.num_qubits == uncapped.num_qubits

@@ -220,3 +220,37 @@ def test_compare_circuits_validates_its_mapping() -> None:
         compare_circuits({"": trace_circuit()})
     with pytest.raises(TypeError, match="CompiledCircuit"):
         compare_circuits({"raw": trace_circuit().circuit})
+
+
+def test_unknown_identity_fields_stay_absent_instead_of_becoming_zero() -> None:
+    from digital_compiler import AJLCompiler, AJLPathModel, compilation_info
+
+    compilation = AJLCompiler(AJLPathModel(2, 5)).compile_hadamard_test("s1^2", "10")
+    info = dict(compilation_info(compilation).reports)["Level 1"]
+
+    # A bare compilation has no closure or AJL root. Reporting k as 0 would put
+    # a plausible-looking integer into structured research output.
+    assert info.k is None
+    assert info.as_dict()["identity"]["k"] is None
+    assert info.closure == "n/a"
+    assert "strands / k" in str(info)
+    assert "2 / n/a" in str(info)
+
+
+def test_comparisons_reject_duplicate_labels_at_construction() -> None:
+    report = trace_circuit().info()
+
+    with pytest.raises(ValueError, match="labels must be unique"):
+        CircuitComparison(
+            reports=(("Level 3", report), ("Level 3", report)),
+            warnings=(),
+        )
+
+
+def test_empty_gate_tables_render_instead_of_raising() -> None:
+    from digital_compiler.reporting import _text_table
+
+    assert _text_table(("family", "count"), []).splitlines() == [
+        "family  count",
+        "------  -----",
+    ]

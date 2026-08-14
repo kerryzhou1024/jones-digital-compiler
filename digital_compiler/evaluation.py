@@ -242,6 +242,91 @@ def _normalize_closure(
 
 
 @dataclass(frozen=True)
+class _RunOptions:
+    """Validated shot, confidence, seeding, and sampler choices for one call."""
+
+    method: EvaluationMethod
+    circuit_level: EvaluationCircuitLevel
+    component_shots: int | None
+    success_probability: float | None
+    path_seed: int | None
+    sampler: BaseSamplerV2 | None
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        closure: ClosureSpec,
+        closure_factor: complex,
+        method: EvaluationMethod,
+        circuit_level: EvaluationCircuitLevel,
+        shots: int | None,
+        target_additive_error: float | None,
+        success_probability: float | None,
+        seed: int | None,
+        path_seed: int | None,
+        sampler: BaseSamplerV2 | None,
+    ) -> _RunOptions:
+        if path_seed is not None and (method != "shots" or closure.kind != "trace"):
+            raise ValueError(
+                "path_seed can only be specified for shot-based trace evaluation"
+            )
+        if method == "statevector":
+            for value, name in (
+                (shots, "shots"),
+                (target_additive_error, "target_additive_error"),
+                (success_probability, "success_probability"),
+                (seed, "seed"),
+                (sampler, "sampler"),
+            ):
+                if value is not None:
+                    raise ValueError(f"{name} can only be specified when method='shots'")
+            return cls(method, circuit_level, None, None, None, None)
+
+        if shots is not None and target_additive_error is not None:
+            raise ValueError("shots and target_additive_error are mutually exclusive")
+        confidence = _success_probability(success_probability)
+        if target_additive_error is None:
+            component_shots = _positive_shots(DEFAULT_SHOTS if shots is None else shots)
+        else:
+            component_shots = _shots_for_additive_error(
+                target_additive_error,
+                closure_factor=closure_factor,
+                success_probability=confidence,
+            )
+
+        if sampler is None:
+            active_sampler: BaseSamplerV2 = StatevectorSampler(seed=seed)
+        elif seed is not None:
+            raise ValueError(
+                "seed configures only the default StatevectorSampler; "
+                "configure a custom sampler directly"
+            )
+        elif not isinstance(sampler, BaseSamplerV2):
+            raise TypeError("sampler must implement Qiskit's BaseSamplerV2")
+        else:
+            active_sampler = sampler
+
+        return cls(
+            method=method,
+            circuit_level=circuit_level,
+            component_shots=component_shots,
+            success_probability=confidence,
+            # Only a sampled trace draws paths, so only it seeds them.
+            path_seed=(
+                _nonnegative_path_seed(seed if path_seed is None else path_seed)
+                if closure.kind == "trace"
+                else None
+            ),
+            sampler=active_sampler,
+        )
+
+    @property
+    def sampler_name(self) -> str | None:
+        return None if self.sampler is None else type(self.sampler).__name__
+
+
+@dataclass(frozen=True)
 class JonesEvaluation:
     """Complete numerical Jones evaluation and its sampling metadata."""
 
@@ -322,6 +407,9 @@ class AJLJonesEvaluator:
 
     @staticmethod
     def _statevector_component(circuit) -> HadamardComponentEstimate:
+        control = circuit.find_bit(circuit.qubits[0]).registers[0][0]
+        if control.name != "ctrl":
+            raise ValueError("a Hadamard-test circuit must start with its control")
         state = Statevector.from_instruction(circuit)
         probabilities = state.probabilities(qargs=[0])
         expectation = float(probabilities[0] - probabilities[1])
@@ -583,161 +671,150 @@ class AJLJonesEvaluator:
             plat_writhe,
             writhe_name="plat_writhe",
         )
-        closure_factor = closure_spec.normalization_factor(
-            self.model,
-            braid_word,
+        closure_factor = closure_spec.normalization_factor(self.model, braid_word)
+        options = _RunOptions.build(
+            closure=closure_spec,
+            closure_factor=closure_factor,
+            method=method,
+            circuit_level=circuit_level,
+            shots=shots,
+            target_additive_error=target_additive_error,
+            success_probability=success_probability,
+            seed=seed,
+            path_seed=path_seed,
+            sampler=sampler,
         )
-        sampler_name = None
-        effective_success_probability = None
 
-        if method == "statevector":
-            if shots is not None:
-                raise ValueError("shots can only be specified when method='shots'")
-            if target_additive_error is not None:
-                raise ValueError(
-                    "target_additive_error can only be specified when method='shots'"
-                )
-            if success_probability is not None:
-                raise ValueError(
-                    "success_probability can only be specified when method='shots'"
-                )
-            if seed is not None:
-                raise ValueError("seed can only be specified when method='shots'")
-            if path_seed is not None:
-                raise ValueError(
-                    "path_seed can only be specified for shot-based trace evaluation"
-                )
-            if sampler is not None:
-                raise ValueError("sampler can only be specified when method='shots'")
-            component_shots = None
-            active_sampler = None
-        else:
-            if shots is not None and target_additive_error is not None:
-                raise ValueError(
-                    "shots and target_additive_error are mutually exclusive"
-                )
-            effective_success_probability = _success_probability(
-                success_probability
-            )
-            if target_additive_error is None:
-                component_shots = _positive_shots(
-                    DEFAULT_SHOTS if shots is None else shots
-                )
-            else:
-                component_shots = _shots_for_additive_error(
-                    target_additive_error,
-                    closure_factor=closure_factor,
-                    success_probability=effective_success_probability,
-                )
-            if closure_spec.kind == "plat" and path_seed is not None:
-                raise ValueError(
-                    "path_seed can only be specified for shot-based trace evaluation"
-                )
-            if sampler is None:
-                active_sampler = StatevectorSampler(seed=seed)
-            else:
-                if seed is not None:
-                    raise ValueError(
-                        "seed configures only the default StatevectorSampler; "
-                        "configure a custom sampler directly"
-                    )
-                if not isinstance(sampler, BaseSamplerV2):
-                    raise TypeError("sampler must implement Qiskit's BaseSamplerV2")
-                active_sampler = sampler
-            sampler_name = type(active_sampler).__name__
-
-        if method == "shots" and closure_spec.kind == "trace":
-            effective_path_seed = _nonnegative_path_seed(
-                seed if path_seed is None else path_seed
-            )
-            assert component_shots is not None
-            assert active_sampler is not None
-            (
-                real_sample,
-                imag_sample,
-                effective_synthesis_budget,
-            ) = self._sampled_trace_components(
-                braid_word,
-                circuit_level,
-                component_shots,
-                active_sampler,
-                effective_path_seed,
-            )
-            trace_samples = (real_sample, imag_sample)
-            markov_trace = complex(
-                real_sample.expectation,
-                imag_sample.expectation,
-            )
-            value = complex(closure_factor * markov_trace)
-            real_error, imag_error = self._propagate_component_standard_errors(
+        if options.method == "shots" and closure_spec.kind == "trace":
+            return self._sampled_trace_evaluation(
                 braid_word,
                 closure_spec,
-                real_sample.standard_error,
-                imag_sample.standard_error,
+                closure_factor,
+                options,
             )
-            assert effective_success_probability is not None
-            markov_error_bound = _complex_additive_error_bound(
-                component_shots,
-                effective_success_probability,
-            )
-            return JonesEvaluation(
-                model=self.model,
-                word=braid_word,
-                closure=closure_spec.kind,
-                plat_writhe=closure_spec.writhe,
-                method=method,
-                circuit_level=circuit_level,
-                config=self.config,
-                path_sampling="ajl_weighted",
-                path_estimates=None,
-                trace_samples=trace_samples,
-                markov_trace=markov_trace,
-                value=value,
-                real_standard_error=real_error,
-                imag_standard_error=imag_error,
-                circuit_count=sum(sample.circuit_count for sample in trace_samples),
-                shots_per_circuit=None,
-                shots_per_component=component_shots,
-                total_shots=2 * component_shots,
-                sampler_name=sampler_name,
-                markov_trace_additive_error_bound=markov_error_bound,
-                value_additive_error_bound=abs(closure_factor) * markov_error_bound,
-                synthesis_error_budget_per_circuit=(
-                    None
-                    if circuit_level != 4
-                    else self.config.level4.synthesis_error_budget
-                ),
-                value_synthesis_error_bound=(
-                    None
-                    if circuit_level != 4
-                    else 2.0
-                    * math.sqrt(2.0)
-                    * abs(closure_factor)
-                    * effective_synthesis_budget
-                ),
-                ajl_success_probability=effective_success_probability,
-            )
+        return self._fixed_path_evaluation(
+            braid_word,
+            closure_spec,
+            closure_factor,
+            options,
+        )
 
-        paths = closure_spec.paths(self.model)
+    def _shared_evaluation_fields(
+        self,
+        word: BraidWord,
+        closure: ClosureSpec,
+        closure_factor: complex,
+        options: _RunOptions,
+        synthesis_budget: float,
+    ) -> dict[str, object]:
+        """Return the fields every evaluation reports identically.
+
+        Level-4 synthesis replaces each component circuit ``C`` by ``C_tilde``
+        with ``norm(C - C_tilde) <= budget``, so each measured component moves
+        by at most ``2 * budget``, a complex amplitude by ``2 * sqrt(2) *
+        budget``, and the closure-normalized Jones value by that times
+        ``abs(closure_factor)``.  Averaging over paths does not enlarge it.
+        """
+
+        level_4 = self.config.level4 if options.circuit_level == 4 else None
+        return {
+            "model": self.model,
+            "word": word,
+            "closure": closure.kind,
+            "plat_writhe": closure.writhe,
+            "method": options.method,
+            "circuit_level": options.circuit_level,
+            "config": self.config,
+            "sampler_name": options.sampler_name,
+            "ajl_success_probability": options.success_probability,
+            "synthesis_error_budget_per_circuit": (
+                None if level_4 is None else level_4.synthesis_error_budget
+            ),
+            "value_synthesis_error_bound": (
+                None
+                if level_4 is None
+                else 2.0 * math.sqrt(2.0) * abs(closure_factor) * synthesis_budget
+            ),
+        }
+
+    def _sampled_trace_evaluation(
+        self,
+        word: BraidWord,
+        closure: ClosureSpec,
+        closure_factor: complex,
+        options: _RunOptions,
+    ) -> JonesEvaluation:
+        """Estimate a trace closure from AJL endpoint-weighted path samples."""
+
+        shots = options.component_shots
+        assert shots is not None and options.sampler is not None
+        assert options.success_probability is not None
+        real_sample, imag_sample, synthesis_budget = self._sampled_trace_components(
+            word,
+            options.circuit_level,
+            shots,
+            options.sampler,
+            options.path_seed,
+        )
+        markov_trace = complex(real_sample.expectation, imag_sample.expectation)
+        real_error, imag_error = self._propagate_component_standard_errors(
+            word,
+            closure,
+            real_sample.standard_error,
+            imag_sample.standard_error,
+        )
+        markov_error_bound = _complex_additive_error_bound(
+            shots,
+            options.success_probability,
+        )
+        return JonesEvaluation(
+            **self._shared_evaluation_fields(
+                word,
+                closure,
+                closure_factor,
+                options,
+                synthesis_budget,
+            ),
+            path_sampling="ajl_weighted",
+            path_estimates=None,
+            trace_samples=(real_sample, imag_sample),
+            markov_trace=markov_trace,
+            value=complex(closure_factor * markov_trace),
+            real_standard_error=real_error,
+            imag_standard_error=imag_error,
+            circuit_count=real_sample.circuit_count + imag_sample.circuit_count,
+            shots_per_circuit=None,
+            shots_per_component=shots,
+            total_shots=2 * shots,
+            markov_trace_additive_error_bound=markov_error_bound,
+            value_additive_error_bound=abs(closure_factor) * markov_error_bound,
+        )
+
+    def _fixed_path_evaluation(
+        self,
+        word: BraidWord,
+        closure: ClosureSpec,
+        closure_factor: complex,
+        options: _RunOptions,
+    ) -> JonesEvaluation:
+        """Estimate a closure from its complete, fixed set of path circuits."""
+
+        paths = closure.paths(self.model)
         tasks = circuit_tasks(paths)
-        if method == "statevector":
-            components, effective_synthesis_budget = self._statevector_estimates(
-                braid_word,
+        if options.method == "statevector":
+            components, synthesis_budget = self._statevector_estimates(
+                word,
                 tasks,
-                circuit_level,
+                options.circuit_level,
             )
         else:
-            assert component_shots is not None
-            assert active_sampler is not None
-            (
-                components,
-                effective_synthesis_budget,
-            ) = self._sampled_fixed_path_estimates(
-                braid_word,
+            assert options.component_shots is not None and options.sampler is not None
+            components, synthesis_budget = self._sampled_fixed_path_estimates(
+                word,
                 tasks,
-                circuit_level,
-                component_shots,
-                active_sampler,
+                options.circuit_level,
+                options.component_shots,
+                options.sampler,
             )
 
         path_estimates = tuple(
@@ -749,43 +826,34 @@ class AJLJonesEvaluator:
             )
             for path in paths
         )
-        amplitudes = {
-            estimate.path: estimate.amplitude for estimate in path_estimates
-        }
-        markov_trace, value = closure_spec.evaluate(
+        markov_trace, value = closure.evaluate(
             self.model,
-            braid_word,
-            amplitudes,
+            word,
+            {estimate.path: estimate.amplitude for estimate in path_estimates},
         )
         real_error, imag_error = self._propagate_standard_errors(
-            braid_word,
+            word,
             path_estimates,
-            closure_spec,
-        )
-        total_shots = sum(
-            estimate.real.shots + estimate.imag.shots
-            for estimate in path_estimates
+            closure,
         )
         value_additive_error_bound = None
-        if component_shots is not None:
-            assert effective_success_probability is not None
+        if options.component_shots is not None:
+            assert options.success_probability is not None
             value_additive_error_bound = abs(
                 closure_factor
             ) * _complex_additive_error_bound(
-                component_shots,
-                effective_success_probability,
+                options.component_shots,
+                options.success_probability,
             )
         return JonesEvaluation(
-            model=self.model,
-            word=braid_word,
-            closure=closure_spec.kind,
-            plat_writhe=closure_spec.writhe,
-            method=method,
-            circuit_level=circuit_level,
-            config=self.config,
-            path_sampling=(
-                "enumerated" if closure_spec.kind == "trace" else "fixed_plat"
+            **self._shared_evaluation_fields(
+                word,
+                closure,
+                closure_factor,
+                options,
+                synthesis_budget,
             ),
+            path_sampling="enumerated" if closure.kind == "trace" else "fixed_plat",
             path_estimates=path_estimates,
             trace_samples=None,
             markov_trace=markov_trace,
@@ -793,26 +861,14 @@ class AJLJonesEvaluator:
             real_standard_error=real_error,
             imag_standard_error=imag_error,
             circuit_count=len(tasks),
-            shots_per_circuit=component_shots,
-            shots_per_component=component_shots,
-            total_shots=total_shots,
-            sampler_name=sampler_name,
+            shots_per_circuit=options.component_shots,
+            shots_per_component=options.component_shots,
+            total_shots=sum(
+                estimate.real.shots + estimate.imag.shots
+                for estimate in path_estimates
+            ),
             markov_trace_additive_error_bound=None,
             value_additive_error_bound=value_additive_error_bound,
-            synthesis_error_budget_per_circuit=(
-                None
-                if circuit_level != 4
-                else self.config.level4.synthesis_error_budget
-            ),
-            value_synthesis_error_bound=(
-                None
-                if circuit_level != 4
-                else 2.0
-                * math.sqrt(2.0)
-                * abs(closure_factor)
-                * effective_synthesis_budget
-            ),
-            ajl_success_probability=effective_success_probability,
         )
 
     def _propagate_standard_errors(

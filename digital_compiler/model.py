@@ -47,7 +47,7 @@ def _coerce_path_bit(value: object) -> int:
 
 @dataclass(frozen=True)
 class BraidGenerator:
-    """One signed braid generator :math:`\sigma_i^{\pm1}`."""
+    r"""One signed braid generator :math:`\sigma_i^{\pm1}`."""
 
     index: int
     sign: int = 1
@@ -223,6 +223,15 @@ class AJLPathModel:
     @staticmethod
     def bitstring(bits: Sequence[int]) -> str:
         return "".join(str(_coerce_path_bit(bit)) for bit in bits)
+
+    def first_valid_path(self) -> tuple[int, ...]:
+        """Return ``valid_paths()[0]`` without enumerating the path basis.
+
+        Depth-first enumeration steps down whenever it can, so the first
+        complete path always alternates up, down, up, ... from vertex 1.
+        """
+
+        return tuple(1 if position % 2 == 0 else 0 for position in range(self.strands))
 
     def valid_paths(self) -> tuple[tuple[int, ...], ...]:
         """Enumerate complete valid paths, pruning boundary violations eagerly.

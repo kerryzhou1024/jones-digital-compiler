@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from html import escape
 
@@ -12,6 +13,7 @@ from .model import HadamardPart
 from .primitives import PrefixAdderGate
 from .problem import CircuitLevelSelection, JonesProblem
 
+_log = logging.getLogger(__name__)
 _LANE_COLORS = ("#c43d4b", "#2f6fdf", "#16866f", "#8a56b3", "#d27a19")
 _SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 _SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
@@ -111,11 +113,17 @@ def _semantic_stages(instructions, layers):
 
 
 def _level_1_svg(circuit: QuantumCircuit) -> str | None:
-    """Return a symbolic SVG for a well-formed Level-1 circuit."""
+    """Return a symbolic SVG for a well-formed Level-1 circuit.
+
+    Anything the symbolic renderer does not recognize falls back to Qiskit's
+    own drawing, logged at debug level so a genuine Level-1 regression is
+    still discoverable rather than silently redrawn.
+    """
 
     try:
         return _render_level_1_svg(circuit)
-    except (IndexError, KeyError, TypeError, ValueError):
+    except (IndexError, KeyError, TypeError, ValueError) as error:
+        _log.debug("symbolic Level-1 rendering declined: %s", error)
         return None
 
 
@@ -144,7 +152,6 @@ def _render_level_1_svg(circuit: QuantumCircuit) -> str:
 
     selector_width = metadata.get("height_selector_qubits")
     lane_count = metadata.get("parallel_lanes")
-    active_width = metadata.get("active_parallel_width")
     raw_layers = metadata.get("generator_layers")
     if (
         isinstance(selector_width, bool)
@@ -153,10 +160,6 @@ def _render_level_1_svg(circuit: QuantumCircuit) -> str:
         or isinstance(lane_count, bool)
         or not isinstance(lane_count, int)
         or lane_count < 1
-        or isinstance(active_width, bool)
-        or not isinstance(active_width, int)
-        or active_width < 0
-        or active_width > lane_count
         or height.size != selector_width * lane_count
     ):
         raise ValueError("invalid Level-1 lane metadata")
@@ -164,11 +167,12 @@ def _render_level_1_svg(circuit: QuantumCircuit) -> str:
         layers = tuple(tuple(int(value) for value in layer) for layer in raw_layers)
     except (TypeError, ValueError):
         raise ValueError("invalid Level-1 generator layers") from None
-    if max((len(layer) for layer in layers), default=0) != active_width:
-        raise ValueError("active width disagrees with generator layers")
+    # Lanes are allocated from the widest layer, so the two must agree.
+    if max((len(layer) for layer in layers), default=0) != lane_count:
+        raise ValueError("lane count disagrees with generator layers")
 
     if distribution == "tree_fanout":
-        expected_fanout = max(0, active_width - 1)
+        expected_fanout = max(0, lane_count - 1)
         if expected_fanout == 0 and fanout is not None:
             raise ValueError("inactive tree fanout must not allocate qubits")
         if expected_fanout and (fanout is None or fanout.size != expected_fanout):
@@ -224,7 +228,7 @@ def _render_level_1_svg(circuit: QuantumCircuit) -> str:
     )
     if distribution == "shared" and (fanout_operations or unfanout_operations):
         raise ValueError("shared control cannot contain fanout CNOTs")
-    if distribution == "tree_fanout" and active_width > 1:
+    if distribution == "tree_fanout" and lane_count > 1:
         if not fanout_operations or fanout_pairs != unfanout_pairs:
             raise ValueError("tree fanout must be reversibly uncomputed")
 
@@ -372,7 +376,7 @@ def _render_level_1_svg(circuit: QuantumCircuit) -> str:
     if fanout_indices and unfanout_indices:
         color_start = unit_x[fanout_indices[-1]] + 12
         color_end = unit_x[unfanout_indices[0]] - 12
-        for lane, qubit in enumerate(control_qubits[:active_width]):
+        for lane, qubit in enumerate(control_qubits[:lane_count]):
             svg.append(
                 f'<line x1="{color_start}" y1="{control_y_by_qubit[qubit]}" '
                 f'x2="{color_end}" y2="{control_y_by_qubit[qubit]}" '
@@ -413,7 +417,7 @@ def _render_level_1_svg(circuit: QuantumCircuit) -> str:
         )
 
     def draw_fanout(x: float, css_class: str) -> None:
-        targets = control_qubits[1:active_width]
+        targets = control_qubits[1:lane_count]
         if not targets:
             return
         svg.append(f'<g class="operation {css_class}">')

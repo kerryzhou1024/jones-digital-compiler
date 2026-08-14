@@ -94,6 +94,40 @@ def t_layer_widths(circuit: QuantumCircuit) -> tuple[int, ...]:
     return tuple(widths.get(level, 0) for level in range(1, maximum + 1))
 
 
+def clifford_t_counts(circuit: QuantumCircuit) -> dict[str, object]:
+    """Return the Clifford+T gate tallies shared by every Level-4 report.
+
+    This is the single measurement of a Level-4 circuit: both
+    :class:`LogicalResourceReport` and the notebook circuit reports read it,
+    so the two can never drift apart.
+    """
+
+    gate_names = [
+        instruction.operation.name
+        for instruction in circuit.data
+        if isinstance(instruction.operation, Gate)
+    ]
+    layers = t_layer_widths(circuit)
+    return {
+        "clifford_count": sum(name in CLIFFORD_GATE_NAMES for name in gate_names),
+        "clifford_depth": circuit.depth(
+            lambda instruction: (
+                isinstance(instruction.operation, Gate)
+                and instruction.operation.name in CLIFFORD_GATE_NAMES
+            )
+        ),
+        "cx_count": sum(name == "cx" for name in gate_names),
+        "cx_depth": circuit.depth(
+            lambda instruction: instruction.operation.name == "cx"
+        ),
+        "t_gate_count": sum(name == "t" for name in gate_names),
+        "tdg_gate_count": sum(name == "tdg" for name in gate_names),
+        "t_count": sum(name in T_GATE_NAMES for name in gate_names),
+        "t_depth": len(layers),
+        "t_layer_widths": layers,
+    }
+
+
 def logical_resource_report(
     circuit: QuantumCircuit,
     *,
@@ -104,41 +138,21 @@ def logical_resource_report(
     """Measure one circuit after enforcing the Level-4 contract."""
 
     assert_clifford_t_contract(circuit)
-    gate_names = [
-        instruction.operation.name
-        for instruction in circuit.data
-        if isinstance(instruction.operation, Gate)
-    ]
-    layers = t_layer_widths(circuit)
+    gate_count = sum(
+        isinstance(instruction.operation, Gate) for instruction in circuit.data
+    )
     per_rotation_error = (
         None
         if arbitrary_rotation_count == 0
         else config.synthesis_error_budget / arbitrary_rotation_count
     )
     return LogicalResourceReport(
+        **clifford_t_counts(circuit),
         logical_qubits=circuit.num_qubits,
-        total_gate_count=len(gate_names),
+        total_gate_count=gate_count,
         total_depth=circuit.depth(
             lambda instruction: isinstance(instruction.operation, Gate)
         ),
-        clifford_count=sum(
-            name in CLIFFORD_GATE_NAMES for name in gate_names
-        ),
-        clifford_depth=circuit.depth(
-            lambda instruction: (
-                isinstance(instruction.operation, Gate)
-                and instruction.operation.name in CLIFFORD_GATE_NAMES
-            )
-        ),
-        cx_count=sum(name == "cx" for name in gate_names),
-        cx_depth=circuit.depth(
-            lambda instruction: instruction.operation.name == "cx"
-        ),
-        t_gate_count=sum(name == "t" for name in gate_names),
-        tdg_gate_count=sum(name == "tdg" for name in gate_names),
-        t_count=sum(name in T_GATE_NAMES for name in gate_names),
-        t_depth=len(layers),
-        t_layer_widths=layers,
         measurement_count=sum(
             instruction.operation.name == "measure"
             for instruction in circuit.data

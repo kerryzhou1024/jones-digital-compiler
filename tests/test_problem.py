@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import pickle
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -258,6 +260,7 @@ def test_problem_propagates_compiler_policy_to_circuits_and_results() -> None:
         "height_encoding": "vertex_minus_one",
         "height_selector_qubits": 2,
         "height_register_qubits": 4,
+        "lane_capacity": 2,
         "parallel_lanes": 2,
         "control_fanout_qubits": 0,
     }
@@ -329,3 +332,32 @@ def test_dense_reference_value_matches_statevector_evaluation(
     problem: JonesProblem,
 ) -> None:
     assert abs(problem.reference_value() - problem.evaluate().value) < TOL
+
+
+@pytest.mark.parametrize("circuit_level", [1, 2, 3])
+def test_compiled_circuits_survive_copy_and_pickle(circuit_level: int) -> None:
+    # Attribute forwarding must not swallow the dunder lookups that copy and
+    # pickle perform, or a round trip recurses until the stack runs out.
+    compiled = JonesProblem("s1^2", strands=2, k=5).circuit(
+        "10",
+        "real",
+        circuit_level=circuit_level,
+    )
+
+    for restored in (copy.deepcopy(compiled), pickle.loads(pickle.dumps(compiled))):
+        assert restored == compiled
+        assert restored.circuit_level == circuit_level
+        assert restored.circuit.count_ops() == compiled.circuit.count_ops()
+        assert restored.num_qubits == compiled.num_qubits
+
+
+def test_default_path_matches_enumeration_without_enumerating() -> None:
+    for strands in range(2, 12):
+        for k in (3, 4, 5, 9):
+            model = AJLPathModel(strands=strands, level=k)
+            first = model.first_valid_path()
+            assert first == model.valid_paths()[0]
+            assert model.coerce_path(first) == first
+
+    problem = JonesProblem("s1", strands=9, k=5)
+    assert problem.circuit(circuit_level=1).path == problem.valid_paths[0]

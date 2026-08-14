@@ -165,7 +165,14 @@ class UncomputeFinalHeight:
 
 
 class PrefixHeightPolicy(Protocol):
-    """Strategy for routing prefix heights through scheduled generator layers."""
+    """Strategy for routing prefix heights through scheduled generator layers.
+
+    ``lanes`` is the number of height lanes the circuit allocates, which is
+    the width of the widest scheduled layer -- not the scheduling policy's
+    lane budget.  A plan may use lanes ``0 .. lanes - 1``, and the compiler
+    rejects any plan that leaves a lane live across a layer that does not use
+    it, so this count is always sufficient.
+    """
 
     name: str
 
@@ -173,7 +180,7 @@ class PrefixHeightPolicy(Protocol):
         self,
         word: BraidWord,
         schedule: GeneratorSchedule,
-        lane_capacity: int,
+        lanes: int,
     ) -> PrefixHeightPlan: ...
 
     def metadata(self) -> dict[str, object]: ...
@@ -189,9 +196,9 @@ class RecomputePrefixHeight:
         self,
         word: BraidWord,
         schedule: GeneratorSchedule,
-        lane_capacity: int,
+        lanes: int,
     ) -> PrefixHeightPlan:
-        del lane_capacity
+        del lanes
         layers = []
         for layer in schedule:
             routed = tuple(
@@ -323,7 +330,7 @@ class RollingPrefixHeight:
         self,
         word: BraidWord,
         schedule: GeneratorSchedule,
-        lane_capacity: int,
+        lanes: int,
     ) -> PrefixHeightPlan:
         current: dict[int, int] = {}
         layers = []
@@ -345,7 +352,7 @@ class RollingPrefixHeight:
 
             assignment = {position: lane for lane, position in matches}
             available_lanes = (
-                lane for lane in range(lane_capacity) if lane not in matched_lanes
+                lane for lane in range(lanes) if lane not in matched_lanes
             )
             for position in sorted(
                 position for _, position in targets if position not in matched_positions
@@ -533,11 +540,15 @@ class CommutingLayerScheduling:
 
 
 class ControlDistributionPolicy(Protocol):
-    """Strategy for distributing one coherent experiment control across lanes."""
+    """Strategy for distributing one coherent experiment control across lanes.
+
+    ``lanes`` is the number of height lanes the circuit allocates, so a policy
+    is only ever asked to fan out as wide as the schedule actually runs.
+    """
 
     name: str
 
-    def control_ancillas(self, lane_capacity: int) -> int: ...
+    def control_ancillas(self, lanes: int) -> int: ...
 
     def prepare(
         self,
@@ -565,8 +576,8 @@ class SharedControl:
     name: str = "shared"
 
     @staticmethod
-    def control_ancillas(lane_capacity: int) -> int:
-        del lane_capacity
+    def control_ancillas(lanes: int) -> int:
+        del lanes
         return 0
 
     @staticmethod
@@ -605,10 +616,10 @@ class TreeControlFanout:
     name: str = "tree_fanout"
 
     @staticmethod
-    def control_ancillas(lane_capacity: int) -> int:
-        if lane_capacity < 1:
-            raise ValueError("lane capacity must be positive")
-        return lane_capacity - 1
+    def control_ancillas(lanes: int) -> int:
+        if lanes < 1:
+            raise ValueError("lane count must be positive")
+        return lanes - 1
 
     @staticmethod
     def _rounds(control, ancillas, active_width: int):

@@ -25,7 +25,7 @@ from digital_compiler.policies import (
 def serial_plan(policy, word: str, strands: int):
     braid_word = BraidWord.parse(word)
     schedule = SerialGeneratorScheduling().schedule(braid_word, strands)
-    return policy.route(braid_word, schedule, lane_capacity=1)
+    return policy.route(braid_word, schedule, lanes=1)
 
 
 @pytest.mark.parametrize("policy", [RollingPrefixHeight(), RecomputePrefixHeight()])
@@ -111,8 +111,8 @@ def test_parallel_route_uses_the_minimum_cost_lane_assignment() -> None:
     word = BraidWord.parse("100 99 101")
     scheduler = CommutingLayerScheduling(max_lanes=2)
     schedule = scheduler.schedule(word, strands=102)
-    rolling = RollingPrefixHeight().route(word, schedule, lane_capacity=2)
-    recomputed = RecomputePrefixHeight().route(word, schedule, lane_capacity=2)
+    rolling = RollingPrefixHeight().route(word, schedule, lanes=2)
+    recomputed = RecomputePrefixHeight().route(word, schedule, lanes=2)
 
     assert schedule == ((0,), (1, 2))
     assert tuple(
@@ -160,7 +160,7 @@ def test_rolling_route_cleans_lanes_when_parallel_width_shrinks() -> None:
     plan = RollingPrefixHeight().route(
         word,
         ((0, 1, 2), (3, 4)),
-        lane_capacity=3,
+        lanes=3,
     )
 
     second_layer = plan.layers[1]
@@ -180,8 +180,8 @@ class DirtyPrefixHeight:
     name = "test_dirty"
 
     @staticmethod
-    def route(word, schedule, lane_capacity):
-        del word, schedule, lane_capacity
+    def route(word, schedule, lanes):
+        del word, schedule, lanes
         return PrefixHeightPlan(
             (
                 PrefixHeightLayerPlan(
@@ -220,23 +220,24 @@ class ParkedPrefixHeight:
     name = "test_parked"
 
     @staticmethod
-    def route(word, schedule, lane_capacity):
-        del word, schedule, lane_capacity
+    def route(word, schedule, lanes):
+        del word, schedule, lanes
         return PrefixHeightPlan(
             (
                 PrefixHeightLayerPlan(
-                    before=(PrefixHeightTransition(0, None, 4),),
-                    generators=(RoutedGenerator(0, 0),),
+                    before=(
+                        PrefixHeightTransition(0, None, 1),
+                        PrefixHeightTransition(1, None, 3),
+                    ),
+                    generators=(RoutedGenerator(0, 0), RoutedGenerator(1, 1)),
                 ),
                 PrefixHeightLayerPlan(
-                    before=(PrefixHeightTransition(1, None, 3),),
-                    generators=(RoutedGenerator(1, 1),),
-                    after=(PrefixHeightTransition(1, 3, None),),
-                ),
-                PrefixHeightLayerPlan(
-                    before=(),
+                    before=(PrefixHeightTransition(0, 1, 2),),
                     generators=(RoutedGenerator(2, 0),),
-                    after=(PrefixHeightTransition(0, 4, None),),
+                    after=(
+                        PrefixHeightTransition(0, 2, None),
+                        PrefixHeightTransition(1, 3, None),
+                    ),
                 ),
             )
         )
@@ -247,27 +248,27 @@ class ParkedPrefixHeight:
 
 def test_compiler_rejects_a_prefix_height_plan_that_parks_an_idle_lane() -> None:
     compiler = AJLCompiler(
-        AJLPathModel(6, 5),
+        AJLPathModel(4, 5),
         CompilerConfig(
             scheduling=CommutingLayerScheduling(max_lanes=2),
             prefix_height=ParkedPrefixHeight(),
         ),
     )
 
-    # sigma_4 sigma_3 sigma_4 schedules serially, so the middle layer leaves the
-    # lane holding the prefix height of index 4 idle while sigma_3 runs.
+    # sigma_1 and sigma_3 share the first layer, so sigma_2 runs alone in the
+    # second while the lane holding the prefix height of index 3 sits idle.
     with pytest.raises(ValueError, match="clean every inactive lane before a layer"):
-        compiler.level_2_braid_circuit("4 3 4")
+        compiler.level_2_braid_circuit("1 3 2")
 
 
 def test_rolling_routes_never_park_an_idle_lane_across_a_layer() -> None:
     word = BraidWord.parse("1 3 5 2 4 1 5 3")
-    for schedule, lane_capacity in (
+    for schedule, lanes in (
         (((0, 1, 2), (3, 4), (5, 6), (7,)), 3),
         (((0, 1), (2, 3), (4, 5), (6, 7)), 2),
         (tuple((position,) for position in range(word.crossings)), 1),
     ):
-        plan = RollingPrefixHeight().route(word, schedule, lane_capacity)
+        plan = RollingPrefixHeight().route(word, schedule, lanes)
         live: dict[int, int] = {}
         for layer, routed in zip(schedule, plan.layers, strict=True):
             for transition in routed.before:

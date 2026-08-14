@@ -71,6 +71,11 @@ class CompiledCircuit:
     def __getattr__(self, name: str) -> Any:
         """Forward convenience access to the underlying Qiskit circuit."""
 
+        # Dunder lookups must fail here rather than resolve against the
+        # circuit: copy and pickle probe for __getstate__ and friends before
+        # this record has any fields, which would otherwise recurse forever.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
         return getattr(self.circuit, name)
 
     def display(
@@ -224,7 +229,7 @@ class JonesProblem:
         """Compile one component, defaulting to the first valid path."""
 
         normalized_path = (
-            self.valid_paths[0]
+            self.model.first_valid_path()
             if path is None
             else self.model.coerce_path(path)
         )

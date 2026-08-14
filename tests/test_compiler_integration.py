@@ -11,6 +11,7 @@ from qiskit.quantum_info import Statevector
 from digital_compiler import (
     AJLCompiler,
     AJLPathModel,
+    BraidGenerator,
     CleanAncillaMCX,
     CompilerConfig,
     DenseAJLReference,
@@ -91,7 +92,6 @@ def test_height_encoding_uses_the_minimum_zero_based_selector(level: int) -> Non
     compiler = AJLCompiler(model)
     expected_width = (level - 2).bit_length()
 
-    assert compiler.height_qubits == expected_width
     assert compiler.height_selector_qubits == expected_width
     assert len(compiler.projector_basis_angles) == 1 << expected_width
     assert len(compiler.projector_alignment_angles) == 1 << expected_width
@@ -118,7 +118,7 @@ def test_height_encoding_uses_the_minimum_zero_based_selector(level: int) -> Non
 
 def test_height_one_load_and_unload_are_gate_free() -> None:
     compiler = AJLCompiler(AJLPathModel(strands=2, level=5))
-    circuit = QuantumCircuit(compiler.height_qubits)
+    circuit = QuantumCircuit(compiler.height_selector_qubits)
     height = list(circuit.qubits)
 
     compiler._compute_prefix_height(circuit, (), height, index=1)
@@ -131,9 +131,8 @@ def test_k9_minimal_height_width_needs_no_clean_adder_workspace() -> None:
     config = CompilerConfig(level3=Level3Policy(mcx=CleanAncillaMCX()))
     compiler = AJLCompiler(AJLPathModel(strands=3, level=9), config)
 
-    assert compiler.height_qubits == 3
+    assert compiler.height_selector_qubits == 3
     assert compiler.work_qubits_per_lane == 0
-    assert compiler.work_qubits == 0
 
 
 @pytest.mark.parametrize(
@@ -373,14 +372,16 @@ class TwoWorkspaceMCX:
 def test_policy_injection_changes_workspace_dispatch_and_metadata() -> None:
     level_3 = Level3Policy(mcx=TwoWorkspaceMCX())
     config = CompilerConfig(level3=level_3)
-    compiler = AJLCompiler(AJLPathModel(2, 5), config)
-    compilation = compiler.compile_hadamard_test("s1^2", "10")
+    # sigma_2 has a one-step prefix, so this word does route a height and the
+    # policy's workspace request reaches the layout.
+    compiler = AJLCompiler(AJLPathModel(3, 5), config)
+    compilation = compiler.compile_hadamard_test("2", "110")
 
-    assert compiler.work_qubits == 2
-    assert compiler.logical_qubits == 7
+    assert compiler.work_qubits_per_lane == 2
+    assert compiler.logical_qubits_for("2") == 8
     assert register_signature(compilation.level_1_varphi)[0] == (
         ("ctrl", 1),
-        ("path", 2),
+        ("path", 3),
         ("height", 2),
     )
     assert register_signature(compilation.level_2_multicontrolled)[0][-1] == (
@@ -392,13 +393,32 @@ def test_policy_injection_changes_workspace_dispatch_and_metadata() -> None:
     assert metadata["compiler_config"]["workspace_qubits"] == 2
 
 
+def test_a_word_that_routes_no_height_allocates_no_workspace() -> None:
+    config = CompilerConfig(level3=Level3Policy(mcx=TwoWorkspaceMCX()))
+    compiler = AJLCompiler(AJLPathModel(3, 5), config)
+
+    # Every generator sits at index 1, whose prefix is empty, so no adder is
+    # emitted and the MCX workspace cannot be reached by any gate.
+    routeless = compiler.compile_hadamard_test("1 1", "110").level_2_multicontrolled
+    assert routeless.metadata["prefix_height_path_steps"] == 0
+    assert all(register.name != "adder_work" for register in routeless.qregs if register.size)
+    assert routeless.metadata["compiler_config"]["workspace_qubits"] == 0
+    assert routeless.metadata["compiler_config"]["workspace_qubits_per_lane"] == 0
+
+    # Workspace stays uniform per lane above that threshold: a lane routing
+    # only sigma_1 still carries its (idle) share.
+    routed = compiler.compile_hadamard_test("2", "110").level_2_multicontrolled
+    assert routed.metadata["prefix_height_path_steps"] > 0
+    assert routed.metadata["compiler_config"]["workspace_qubits"] == 2
+
+
 def test_default_policy_uses_no_workspace_and_preserves_semantics() -> None:
     model = AJLPathModel(2, 5)
     compiler = AJLCompiler(model)
     compilation = compiler.compile_hadamard_test("s1^2", "10")
 
-    assert compiler.work_qubits == 0
-    assert compiler.logical_qubits == 5
+    assert compiler.work_qubits_per_lane == 0
+    assert compiler.logical_qubits_for("s1^2") == 5
     expected_level_1_registers = (
         ("ctrl", 1),
         ("path", 2),
@@ -463,8 +483,8 @@ def test_clean_ancilla_policy_remains_available_as_an_opt_in() -> None:
     compiler = AJLCompiler(AJLPathModel(2, 5), config)
     compilation = compiler.compile_hadamard_test("s1^2", "10")
 
-    assert compiler.work_qubits == 0
-    assert compiler.logical_qubits == 5
+    assert compiler.work_qubits_per_lane == 0
+    assert compiler.logical_qubits_for("s1^2") == 5
     assert register_signature(compilation.level_1_varphi)[0] == (
         ("ctrl", 1),
         ("path", 2),
@@ -516,9 +536,9 @@ def test_gate_count_depth_report_uses_exact_gate_names_and_parallel_depth() -> N
 def test_default_k5_resources_and_metadata_regression() -> None:
     compiler = AJLCompiler(AJLPathModel(2, 5))
     compilation = compiler.compile_hadamard_test("s1^2", "10")
-    assert compiler.height_qubits == 2
-    assert compiler.work_qubits == 0
-    assert compiler.logical_qubits == 5
+    assert compiler.height_selector_qubits == 2
+    assert compiler.work_qubits_per_lane == 0
+    assert compiler.logical_qubits_for("s1^2") == 5
     assert dict(compilation.level_2_multicontrolled.count_ops()) == {
         "cx": 20,
         "ry": 12,
@@ -598,3 +618,34 @@ def test_compilation_info_reports_one_column_per_compiler_level(capsys) -> None:
     assert "MCPhase" in output
     assert "gate: measure" not in output
     assert "measurements" in output
+
+
+def test_removed_width_attributes_fail_with_their_replacement() -> None:
+    compiler = AJLCompiler(AJLPathModel(2, 5))
+
+    for name, hint in (
+        ("logical_qubits", "logical_qubits_for"),
+        ("parallel_lanes", "lane_capacity"),
+        ("work_qubits", "work_qubits_per_lane"),
+        ("height_qubits", "height_selector_qubits"),
+        ("height_register_qubits", "height_register_qubits"),
+        ("control_fanout_qubits", "control_fanout_qubits"),
+        ("controlled_varphi_gate", "local_controlled_varphi_gate"),
+    ):
+        with pytest.raises(AttributeError, match=hint):
+            getattr(compiler, name)
+
+    with pytest.raises(AttributeError, match="no attribute 'nonsense'"):
+        compiler.nonsense
+
+
+def test_deprecated_varphi_shim_still_builds_the_legacy_block() -> None:
+    from digital_compiler import controlled_varphi_gate, local_controlled_varphi_gate
+
+    generator = BraidGenerator(1, 1)
+    with pytest.deprecated_call():
+        legacy = controlled_varphi_gate(generator, 4)
+
+    assert legacy.num_qubits == 5
+    assert legacy.name == local_controlled_varphi_gate(generator, 2).name
+    assert legacy.num_qubits == local_controlled_varphi_gate(generator, 2).num_qubits

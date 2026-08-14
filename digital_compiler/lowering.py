@@ -130,12 +130,16 @@ class SingleControlLowerer:
     def __init__(self, policy: Level3Policy):
         self.policy = policy
 
-    def lower(self, level_2_circuit: QuantumCircuit) -> QuantumCircuit:
+    def lower(
+        self,
+        level_2_circuit: QuantumCircuit,
+        name: str | None = None,
+    ) -> QuantumCircuit:
         assert_level_2_contract(level_2_circuit)
         level_3 = QuantumCircuit(
             *level_2_circuit.qregs,
             *level_2_circuit.cregs,
-            name=f"level_3_single_control({level_2_circuit.name})",
+            name=name or f"level_3_single_control({level_2_circuit.name})",
         )
         level_3.global_phase = float(level_2_circuit.global_phase)
         metadata = dict(level_2_circuit.metadata or {})

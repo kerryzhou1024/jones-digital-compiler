@@ -13,11 +13,7 @@ from qiskit import QuantumCircuit
 from qiskit.circuit import ControlledGate, Gate
 
 from .compiler import CompilerLevel, HadamardTestCompilation
-from .fault_tolerance import (
-    CLIFFORD_GATE_NAMES,
-    T_GATE_NAMES,
-    t_layer_widths,
-)
+from .fault_tolerance import CLIFFORD_GATE_NAMES, T_GATE_NAMES, clifford_t_counts
 
 if TYPE_CHECKING:
     from .problem import CompiledCircuit
@@ -47,10 +43,7 @@ def _text_table(
 ) -> str:
     text_rows = [tuple(str(value) for value in row) for row in rows]
     widths = [
-        max(
-            len(header),
-            *(len(row[index]) for row in text_rows),
-        )
+        max(len(header), *(len(row[index]) for row in text_rows), 0)
         for index, header in enumerate(headers)
     ]
     header = "  ".join(
@@ -92,7 +85,7 @@ class CircuitInfo:
     signed_generators: tuple[int, ...]
     closure: str
     strands: int
-    k: int
+    k: int | None
     path: tuple[int, ...]
     part: str
     compiler_level: CompilerLevel
@@ -157,7 +150,7 @@ class CircuitInfo:
             ("path", f"|{self.path_label}>"),
             ("component", self.part),
             ("compiler level", self.compiler_level),
-            ("strands / k", f"{self.strands} / {self.k}"),
+            ("strands / k", f"{self.strands} / {'n/a' if self.k is None else self.k}"),
             ("logical qubits", self.logical_qubits),
             ("classical bits", self.classical_bits),
             ("quantum gates", self.quantum_gate_count),
@@ -251,6 +244,11 @@ class CircuitComparison:
     reports: tuple[tuple[str, CircuitInfo], ...]
     warnings: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        labels = [label for label, _ in self.reports]
+        if len(labels) != len(set(labels)):
+            raise ValueError("comparison labels must be unique")
+
     def as_dict(self) -> dict[str, object]:
         return {
             "circuits": {
@@ -260,7 +258,6 @@ class CircuitComparison:
         }
 
     def _comparison_rows(self) -> list[tuple[object, ...]]:
-        labels = tuple(label for label, _ in self.reports)
         fields = (
             ("word", lambda report: report.word),
             ("closure", lambda report: report.closure),
@@ -295,8 +292,6 @@ class CircuitComparison:
             )
             for family in families
         )
-        if len(labels) != len(set(labels)):
-            raise ValueError("comparison labels must be unique")
         return rows
 
     def __str__(self) -> str:
@@ -489,7 +484,6 @@ def _compiler_policy_summary(
         "prefix_height_path_steps": metadata.get("prefix_height_path_steps"),
         "generator_layers": metadata.get("generator_layers"),
         "parallel_lanes": metadata.get("parallel_lanes"),
-        "active_parallel_width": metadata.get("active_parallel_width"),
         "lowering_policies": metadata.get("lowering_policies"),
         "clifford_t_synthesis": metadata.get("clifford_t_synthesis"),
         "configuration": metadata.get(
@@ -507,20 +501,21 @@ def circuit_info(compiled: CompiledCircuit) -> CircuitInfo:
     non_gate_operations = _non_gate_operation_counts(circuit)
     provenance = compiled._provenance
     if provenance is None:
-        word = "unknown"
+        word = "n/a"
         signed_generators: tuple[int, ...] = ()
-        closure = "unknown"
+        closure = "n/a"
         strands = len(compiled.path)
-        k = 0
+        k = None
         fallback_configuration = None
     else:
         word = str(provenance.word)
         signed_generators = provenance.word.signed_indices()
         # A bare compilation has no closure or AJL root; those are evaluation
-        # concepts supplied by JonesProblem.
+        # concepts supplied by JonesProblem, and stay None rather than
+        # becoming a plausible-looking zero in structured output.
         closure = "n/a" if provenance.closure is None else provenance.closure
         strands = provenance.strands
-        k = 0 if provenance.k is None else provenance.k
+        k = provenance.k
         fallback_configuration = provenance.config.metadata()
 
     scope_notes = [
@@ -545,43 +540,18 @@ def circuit_info(compiled: CompiledCircuit) -> CircuitInfo:
 
     level_4_resources = None
     if compiled.circuit_level == 4:
-        names = [
-            instruction.operation.name
-            for instruction in circuit.data
-            if isinstance(instruction.operation, Gate)
-        ]
-        layers = t_layer_widths(circuit)
-        synthesis = (circuit.metadata or {}).get(
-            "clifford_t_synthesis",
-            {},
-        )
+        synthesis = (circuit.metadata or {}).get("clifford_t_synthesis", {})
         level_4_resources = {
-            "clifford_count": sum(
-                name in CLIFFORD_GATE_NAMES for name in names
-            ),
-            "clifford_depth": circuit.depth(
-                lambda instruction: (
-                    isinstance(instruction.operation, Gate)
-                    and instruction.operation.name in CLIFFORD_GATE_NAMES
+            **clifford_t_counts(circuit),
+            **{
+                field: synthesis.get(field)
+                for field in (
+                    "original_rz_count",
+                    "arbitrary_rotation_count",
+                    "synthesis_error_budget",
+                    "per_rotation_error",
                 )
-            ),
-            "cx_count": sum(name == "cx" for name in names),
-            "cx_depth": circuit.depth(
-                lambda instruction: instruction.operation.name == "cx"
-            ),
-            "t_gate_count": sum(name == "t" for name in names),
-            "tdg_gate_count": sum(name == "tdg" for name in names),
-            "t_count": sum(name in T_GATE_NAMES for name in names),
-            "t_depth": len(layers),
-            "t_layer_widths": layers,
-            "original_rz_count": synthesis.get("original_rz_count"),
-            "arbitrary_rotation_count": synthesis.get(
-                "arbitrary_rotation_count"
-            ),
-            "synthesis_error_budget": synthesis.get(
-                "synthesis_error_budget"
-            ),
-            "per_rotation_error": synthesis.get("per_rotation_error"),
+            },
         }
 
     return CircuitInfo(
@@ -708,14 +678,6 @@ def compilation_info(compilation: HadamardTestCompilation) -> CircuitComparison:
         strands=len(compilation.initial_path),
         config=compilation.config,
     )
-    levels: list[tuple[CompilerLevel, QuantumCircuit]] = [
-        (1, compilation.level_1_varphi),
-        (2, compilation.level_2_multicontrolled),
-        (3, compilation.level_3_single_control),
-    ]
-    if compilation.level_4_clifford_t is not None:
-        levels.append((4, compilation.level_4_clifford_t))
-
     reports = [
         (
             f"Level {level}",
@@ -730,7 +692,7 @@ def compilation_info(compilation: HadamardTestCompilation) -> CircuitComparison:
                 )
             ),
         )
-        for level, circuit in levels
+        for level, circuit in compilation.levels
     ]
     warnings = [
         "Each column is one compiler level of the same Hadamard-test component, "

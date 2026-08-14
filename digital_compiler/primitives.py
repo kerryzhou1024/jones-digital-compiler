@@ -363,25 +363,40 @@ def controlled_varphi_gate(
 ) -> ControlledGate:
     """Create the legacy full-target opaque controlled AJL block.
 
-    New Level-1 circuits use :func:`local_controlled_varphi_gate`. This helper
-    remains temporarily for callers that construct their own macro circuits.
+    Deprecated: Level-1 compilation builds local blocks with
+    :func:`local_controlled_varphi_gate`, which takes a height-lane width
+    rather than a whole-register target count.
     """
 
     warnings.warn(
-        "controlled_varphi_gate(target_qubits=...) is deprecated; "
-        "Level-1 compilation now constructs local varphi blocks",
+        "controlled_varphi_gate(target_qubits=...) is deprecated; use "
+        "local_controlled_varphi_gate(generator, height_qubits)",
         DeprecationWarning,
         stacklevel=2,
     )
+    if target_qubits < 1:
+        raise ValueError("a varphi block needs at least one target qubit")
+    return _controlled_varphi_gate(generator, int(target_qubits))
 
-    return _controlled_varphi_gate(generator, target_qubits)
+
+def local_controlled_varphi_gate(
+    generator: BraidGenerator,
+    height_qubits: int,
+) -> ControlledGate:
+    """Create an opaque Level-1 block on one local path pair and height lane.
+
+    ``height_qubits=0`` selects the block for a classically known height.
+    """
+
+    if height_qubits < 0:
+        raise ValueError("a local varphi block cannot have negative height qubits")
+    return _controlled_varphi_gate(generator, 2 + int(height_qubits))
 
 
 def _controlled_varphi_gate(
     generator: BraidGenerator,
     target_qubits: int,
 ) -> ControlledGate:
-
     sign_name = "plus" if generator.sign == 1 else "minus"
     operation_name = f"c_varphi_sigma_{generator.index}_{sign_name}"
     exponent = "" if generator.sign == 1 else "⁻¹"
@@ -400,14 +415,3 @@ def _controlled_varphi_gate(
         num_ctrl_qubits=1,
         base_gate=base,
     )
-
-
-def local_controlled_varphi_gate(
-    generator: BraidGenerator,
-    height_qubits: int,
-) -> ControlledGate:
-    """Create an opaque Level-1 block on one local path pair and height lane."""
-
-    if height_qubits < 1:
-        raise ValueError("a local varphi block needs at least one height qubit")
-    return _controlled_varphi_gate(generator, 2 + int(height_qubits))

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 
-import pytest
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 from qiskit.quantum_info import Statevector
 
@@ -13,6 +12,7 @@ from digital_compiler import (
     HadamardTestCompilation,
     append_fixed_height_braid,
     append_hadamard_readout,
+    local_controlled_varphi_gate,
     prepare_basis_path,
 )
 
@@ -83,13 +83,9 @@ def test_fixed_height_hopf_uses_only_public_primitives() -> None:
         circuit.h(control[0])
         for generator in word.generators:
             if level == 1:
-                with pytest.deprecated_call():
-                    varphi = compiler.controlled_varphi_gate(
-                        generator,
-                        include_workspace=False,
-                    )
+                # No height register: the prefix height is classically known.
                 circuit.append(
-                    varphi,
+                    local_controlled_varphi_gate(generator, 0),
                     [control[0], *path],
                 )
             else:

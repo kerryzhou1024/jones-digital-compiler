@@ -226,3 +226,31 @@ def test_all_levels_include_level_4_only_when_configured() -> None:
             circuit_level="all",
         )
     ] == [1, 2, 3, 4]
+
+
+def test_level_4_report_and_circuit_info_share_one_measurement() -> None:
+    # The notebook report and the compiler's own resource record must be the
+    # same numbers, not two independent tallies that can drift apart.
+    config = CompilerConfig(level4=CliffordTConfig(synthesis_error_budget=1e-2))
+    problem = JonesProblem("s1^2", strands=2, k=5, config=config)
+    compilation = problem.compile("10", "real", measure=True)
+    resources = compilation.level_4_resources
+    info = dict(compilation_info(compilation).reports)["Level 4"]
+
+    assert info.level_4_resources is not None
+    shared = {
+        field: getattr(resources, field)
+        for field in (
+            "clifford_count",
+            "clifford_depth",
+            "cx_count",
+            "cx_depth",
+            "t_gate_count",
+            "tdg_gate_count",
+            "t_count",
+            "t_depth",
+            "t_layer_widths",
+        )
+    }
+    assert {field: info.level_4_resources[field] for field in shared} == shared
+    assert info.level_4_resources["per_rotation_error"] == resources.per_rotation_error

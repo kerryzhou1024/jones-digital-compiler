@@ -98,6 +98,15 @@ class DenseAJLReference:
         return sum(int(bit) << position for position, bit in enumerate(bits))
 
     def embed_valid_subspace(self, matrix: np.ndarray) -> np.ndarray:
+        """Pad a path-basis matrix with identity on invalid bitstrings.
+
+        The padding is a convenience for comparing amplitudes on valid paths.
+        It is not a claim about the compiled circuit: AJL leaves the valid
+        subspace invariant, but a compiled braid still applies its base
+        crossing phase to invalid bitstrings, so only valid inputs may be
+        compared against this embedding.
+        """
+
         if matrix.shape != (self.dimension, self.dimension):
             raise ValueError("matrix has the wrong shape for this reference")
         full = np.eye(2**self.model.strands, dtype=complex)

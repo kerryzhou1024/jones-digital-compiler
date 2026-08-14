@@ -201,6 +201,13 @@ statistics, T count and depth, T-layer widths, and synthesis provenance.
 It remains a logical circuit: physical routing, surface-code cycles, magic-state
 factories, and physical-qubit estimates are downstream concerns.
 
+Synthesis replaces each component circuit `C` by `C'` with `norm(C - C') <= B`
+for the configured budget `B`, so a measured component moves by at most `2 * B`,
+a complex path amplitude by at most `2 * sqrt(2) * B`, and — since averaging
+over paths cannot enlarge it — the closure-normalized Jones value by at most
+`2 * sqrt(2) * abs(C_closure) * B`. That last quantity is
+`value_synthesis_error_bound`.
+
 ## Trace and Plat Evaluation
 
 Statevector trace evaluation enumerates the complete valid path basis and
@@ -352,10 +359,17 @@ fanout_config = CompilerConfig(
 )
 ```
 
-`max_lanes=None` reserves up to `strands // 2` lanes; a positive integer caps
-the width. Each lane has a separate prefix-height selector. Controlled circuits
-share one experiment control by default, so no control ancillas are required.
-Use `TreeControlFanout` to trade one clean ancilla per additional lane for
+`max_lanes` is a cap, not a reservation: `None` allows up to `strands // 2`
+lanes and a positive integer allows fewer. A compiled circuit allocates one
+lane per generator in its *widest scheduled layer*, so a braid word with no
+parallelism costs the same width under every cap, and only the schedule a word
+actually reaches is charged to it. `circuit.metadata["parallel_lanes"]` reports
+the lanes a circuit uses; `compiler_config["lane_capacity"]` reports the budget
+the policy allowed.
+
+Each lane has a separate prefix-height selector. Controlled circuits share one
+experiment control by default, so no control ancillas are required. Use
+`TreeControlFanout` to trade one clean ancilla per additional *used* lane for
 disjoint controls prepared by a logarithmic-depth CNOT tree. Clean-ancilla MCX
 workspace remains partitioned by lane. Registers are reused between layers and
 are uncomputed after use. Rolling prefix-height routing matches live selectors
@@ -373,3 +387,35 @@ simultaneous generators have overlapping prefixes.
 See `../notebooks/parallel-generators.ipynb` for the scheduling and
 control-distribution experiments, and `../notebooks/compiler-demo.ipynb` for a
 complete walkthrough.
+
+## Migration: lane right-sizing
+
+Height, workspace, and control-fanout registers used to be sized from the
+scheduling policy's lane budget, so a braid word that never ran two generators
+together still paid for `strands // 2` height lanes. They are now sized from
+the widest layer the schedule actually runs. Gate counts, depths, schedules,
+and prefix-height routes are unchanged; only qubit counts move, and only
+downward.
+
+Because those widths are now word-dependent, the matching `AJLCompiler`
+attributes were removed rather than left returning the old over-count.
+Accessing one raises `AttributeError` naming its replacement:
+
+| Removed | Use instead |
+| --- | --- |
+| `compiler.logical_qubits` | `compiler.logical_qubits_for(word)`, or `circuit.num_qubits` |
+| `compiler.parallel_lanes` | `compiler.lane_capacity` (budget) or `circuit.metadata["parallel_lanes"]` (used) |
+| `compiler.work_qubits` | `compiler.work_qubits_per_lane`, or `metadata["compiler_config"]["workspace_qubits"]` |
+| `compiler.height_register_qubits` | `metadata["compiler_config"]["height_register_qubits"]` |
+| `compiler.control_fanout_qubits` | `metadata["compiler_config"]["control_fanout_qubits"]` |
+| `compiler.height_qubits` | `compiler.height_selector_qubits` |
+| `compiler.controlled_varphi_gate(...)` | `local_controlled_varphi_gate(generator, height_qubits)` |
+
+Circuit metadata drops `active_parallel_width`; `parallel_lanes` now reports
+the lanes a circuit uses, and `compiler_config["lane_capacity"]` reports the
+budget the policy allowed. The module-level `controlled_varphi_gate` remains
+as a deprecated shim and will be removed in the next release.
+
+Custom `PrefixHeightPolicy` and `ControlDistributionPolicy` implementations
+receive the allocated lane count. The arguments are now named `lanes` rather
+than `lane_capacity`; positional implementations are unaffected.

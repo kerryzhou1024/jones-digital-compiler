@@ -123,17 +123,20 @@ def test_level_1_stays_lean_when_later_levels_need_workspace() -> None:
     compiler = AJLCompiler(AJLPathModel(3, 17), config)
     compilation = compiler.compile_hadamard_test("2", "110", measure=False)
 
-    assert compiler.work_qubits > 0
+    assert compiler.work_qubits_per_lane > 0
     assert register_signature(compilation.level_1_varphi)[0] == (
         ("ctrl", 1),
         ("path", 3),
         ("height", 4),
     )
     assert any(
-        register.name == "adder_work" and register.size == compiler.work_qubits
+        register.name == "adder_work" and register.size == compiler.work_qubits_per_lane
         for register in compilation.level_2_multicontrolled.qregs
     )
-    assert compilation.logical_qubits == 8
+    # Level 1 stays at 8; the reported width is the widest level, which
+    # carries the Level-3 clean-ancilla workspace.
+    assert compilation.level_1_varphi.num_qubits == 8
+    assert compilation.logical_qubits == 9
 
 
 def test_level_1_degenerate_words_and_readout_shape() -> None:
@@ -399,6 +402,6 @@ def test_malformed_parallel_level_1_uses_the_qiskit_display_fallback() -> None:
     circuit = AJLCompiler(AJLPathModel(4, 5), config).level_1_varphi_circuit(
         "1 3", "1010"
     )
-    circuit.metadata["active_parallel_width"] = 1
+    circuit.metadata["parallel_lanes"] = 1
 
     assert _level_1_svg(circuit) is None
