@@ -1,29 +1,33 @@
 # Jones Digital Compiler
 
 The `digital_compiler` package is the reusable, policy-driven AJL circuit
-compiler used by the Jones-polynomial research notebooks in this repository.
+compiler for the digital resource-estimation route in our Jones-polynomial
+research. It is the digital code companion to work comparing digital and
+analog approaches; the analog implementation is intentionally outside this
+package.
 
 ## Installation
 
-From this directory:
+Install the tagged paper-companion release directly from GitHub:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install \
+  "jones-digital-compiler @ git+https://github.com/kerryzhou1024/jones-digital-compiler.git@v0.1.0"
 ```
 
-For a core-only installation:
+The distribution is named `jones-digital-compiler`; import it as
+`digital_compiler`.
+
+For a core-only installation from a source checkout:
 
 ```bash
-pip install .
+python -m pip install .
 ```
 
-The repository notebooks intentionally import the checkout's `compiler/`
-source tree, even if the active environment contains an older non-editable
-installation. For ordinary Python sessions, refresh that installation after a
-source change from the repository root:
+For development and notebook dependencies:
 
 ```bash
-pip install --no-build-isolation --force-reinstall --no-deps ./compiler
+python -m pip install ".[notebook,dev]"
 ```
 
 ## Verification
@@ -294,7 +298,7 @@ print(plat.reference_value())
 Plat closure requires an even number of strands. Supply the writhe of the
 chosen oriented plat diagram explicitly: unlike the standard trace orientation,
 it need not equal the braid word's exponent sum. The normalization follows the
-[AJL plat-closure formula](../references/literature/0511096v2.pdf).
+[AJL plat-closure formula](https://arxiv.org/abs/quant-ph/0511096).
 
 The default Level 3 policy uses exact no-ancilla MCX lowering through recursive
 phase decomposition and Gray-code multiplexed rotations. Use
@@ -387,6 +391,18 @@ simultaneous generators have overlapping prefixes.
 Custom `PrefixHeightPolicy` and `ControlDistributionPolicy` implementations
 receive the allocated lane count as `lanes`.
 
-See `../notebooks/parallel-generators.ipynb` for the scheduling and
-control-distribution experiments, and `../notebooks/compiler-demo.ipynb` for a
-complete walkthrough.
+See the companion research repository's
+[`parallel-generators.ipynb`](https://github.com/kerryzhou1024/jones-estimation/blob/digital/notebooks/parallel-generators.ipynb)
+for the scheduling and control-distribution experiments, and
+[`compiler-demo.ipynb`](https://github.com/kerryzhou1024/jones-estimation/blob/digital/notebooks/compiler-demo.ipynb)
+for a complete walkthrough.
+
+## Citation
+
+This package is a paper-companion research artifact. Cite the exact release
+used in an analysis so the compiler policies and resource counts remain
+reproducible. GitHub exposes the repository citation from [`CITATION.cff`](CITATION.cff).
+
+## License
+
+Released under the [MIT License](LICENSE).

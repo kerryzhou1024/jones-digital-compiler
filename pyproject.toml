@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,11 +7,37 @@ name = "jones-digital-compiler"
 version = "0.1.0"
 description = "Policy-driven AJL circuit compiler for Jones-polynomial research"
 readme = "README.md"
+authors = [
+    {name = "Kairui (Kerry) Zhou"},
+]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+keywords = [
+    "AJL algorithm",
+    "Jones polynomial",
+    "quantum circuits",
+    "resource estimation",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "numpy>=2.2,<3",
     "qiskit>=2.5,<2.6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kerryzhou1024/jones-digital-compiler"
+Repository = "https://github.com/kerryzhou1024/jones-digital-compiler"
+Issues = "https://github.com/kerryzhou1024/jones-digital-compiler/issues"
 
 [project.optional-dependencies]
 notebook = [

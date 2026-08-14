@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the release and the companion paper."
+title: "Jones Digital Compiler"
+type: software
+authors:
+  - family-names: "Zhou"
+    given-names: "Kairui (Kerry)"
+version: 0.1.0
+date-released: 2026-08-14
+repository-code: "https://github.com/kerryzhou1024/jones-digital-compiler"
+url: "https://github.com/kerryzhou1024/jones-digital-compiler"
+license: MIT
+abstract: >-
+  A policy-driven AJL quantum-circuit compiler for the digital
+  Jones-polynomial resource-estimation route. This package is the digital code
+  companion to research comparing digital and analog approaches.
+keywords:
+  - AJL algorithm
+  - Jones polynomial
+  - quantum circuits
+  - resource estimation
