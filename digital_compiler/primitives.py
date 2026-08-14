@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Sequence
 from typing import Literal
 
@@ -355,28 +354,6 @@ def append_hadamard_readout(
     circuit.h(control)
     if measurement is not None:
         circuit.measure(control, measurement)
-
-
-def controlled_varphi_gate(
-    generator: BraidGenerator,
-    target_qubits: int,
-) -> ControlledGate:
-    """Create the legacy full-target opaque controlled AJL block.
-
-    Deprecated: Level-1 compilation builds local blocks with
-    :func:`local_controlled_varphi_gate`, which takes a height-lane width
-    rather than a whole-register target count.
-    """
-
-    warnings.warn(
-        "controlled_varphi_gate(target_qubits=...) is deprecated; use "
-        "local_controlled_varphi_gate(generator, height_qubits)",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    if target_qubits < 1:
-        raise ValueError("a varphi block needs at least one target qubit")
-    return _controlled_varphi_gate(generator, int(target_qubits))
 
 
 def local_controlled_varphi_gate(

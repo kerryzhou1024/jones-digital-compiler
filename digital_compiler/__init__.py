@@ -19,7 +19,6 @@ from .evaluation import (
     PathAmplitudeEstimate,
     PathSampling,
     TraceComponentSample,
-    evaluate_jones,
 )
 from .fault_tolerance import (
     CliffordTCompilation,
@@ -81,7 +80,6 @@ from .primitives import (
     append_standard_toffoli,
     append_uniformly_controlled_rotation,
     append_uniformly_controlled_ry,
-    controlled_varphi_gate,
     gray_code_rotation_angles,
     local_controlled_varphi_gate,
     prepare_basis_path,
@@ -175,9 +173,6 @@ __all__ = [
     "coerce_braid_word",
     "compare_circuits",
     "compilation_info",
-    # Deprecated; removed in the next release. See README "Migration".
-    "controlled_varphi_gate",
-    "evaluate_jones",
     "gray_code_rotation_angles",
     "level_1_varphi_names",
     "local_controlled_varphi_gate",

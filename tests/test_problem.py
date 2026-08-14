@@ -15,7 +15,6 @@ from digital_compiler import (
     CompiledCircuit,
     CompilerConfig,
     JonesProblem,
-    evaluate_jones,
 )
 
 TOL = 1e-9
@@ -267,19 +266,16 @@ def test_problem_propagates_compiler_policy_to_circuits_and_results() -> None:
     assert result.config is config
 
 
-def test_problem_statevector_and_legacy_wrapper_match_the_evaluator() -> None:
+def test_problem_statevector_matches_the_evaluator() -> None:
     problem = JonesProblem("s1^2", strands=2, k=5)
     direct = AJLJonesEvaluator(problem.model, problem.config).evaluate(
         problem.word,
         circuit_level=2,
     )
     facade = problem.evaluate(circuit_level=2)
-    legacy = evaluate_jones("s1^2", strands=2, k=5, circuit_level=2)
 
     assert facade.value == direct.value
     assert facade.path_estimates == direct.path_estimates
-    assert legacy.value == facade.value
-    assert legacy.path_estimates == facade.path_estimates
 
 
 def test_problem_shot_evaluation_is_reproducible() -> None:
@@ -303,21 +299,17 @@ def test_problem_shot_evaluation_is_reproducible() -> None:
     assert first.total_shots == 2 * 256
 
 
-def test_problem_target_additive_error_matches_legacy_wrapper() -> None:
-    problem = JonesProblem("s1^2", strands=2)
-    kwargs = {
-        "method": "shots",
-        "circuit_level": 2,
-        "target_additive_error": 1.5,
-        "success_probability": 0.9,
-        "seed": 23,
-    }
-    facade = problem.evaluate(**kwargs)
-    legacy = evaluate_jones("s1^2", strands=2, **kwargs)
+def test_problem_target_additive_error_selects_shots_within_the_bound() -> None:
+    facade = JonesProblem("s1^2", strands=2).evaluate(
+        method="shots",
+        circuit_level=2,
+        target_additive_error=1.5,
+        success_probability=0.9,
+        seed=23,
+    )
 
-    assert facade.shots_per_component == legacy.shots_per_component
-    assert facade.value_additive_error_bound == legacy.value_additive_error_bound
     assert facade.ajl_success_probability == 0.9
+    assert facade.total_shots == 2 * facade.shots_per_component
     assert facade.value_additive_error_bound <= 1.5
 
 

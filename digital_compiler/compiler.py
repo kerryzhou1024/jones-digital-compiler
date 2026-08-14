@@ -40,24 +40,6 @@ LEVEL_4_STATUS = (
 CompilerLevel = Literal[1, 2, 3, 4]
 _HEIGHT_ENCODING = "vertex_minus_one"
 
-# Width attributes that lane right-sizing made word-dependent, and what each
-# caller should read instead.
-_REMOVED_WIDTH_ATTRIBUTES = {
-    "logical_qubits": "AJLCompiler.logical_qubits_for(word) or circuit.num_qubits",
-    "parallel_lanes": (
-        "AJLCompiler.lane_capacity for the budget, or "
-        "circuit.metadata['parallel_lanes'] for the lanes a word uses"
-    ),
-    "height_qubits": "AJLCompiler.height_selector_qubits",
-    "height_register_qubits": "circuit.metadata['compiler_config']['height_register_qubits']",
-    "work_qubits": (
-        "AJLCompiler.work_qubits_per_lane, or "
-        "circuit.metadata['compiler_config']['workspace_qubits']"
-    ),
-    "control_fanout_qubits": "circuit.metadata['compiler_config']['control_fanout_qubits']",
-    "controlled_varphi_gate": "digital_compiler.local_controlled_varphi_gate",
-}
-
 
 def register_signature(
     circuit: QuantumCircuit,
@@ -144,22 +126,6 @@ class HadamardTestCompilation:
         """Return the width of the widest level; Level 1 carries no workspace."""
 
         return max(circuit.num_qubits for _, circuit in self.levels)
-
-    @property
-    def height_policy_label(self) -> str:
-        return self.config.height.name
-
-    @property
-    def scheduling_policy_label(self) -> str:
-        return self.config.scheduling.name
-
-    @property
-    def prefix_height_policy_label(self) -> str:
-        return self.config.prefix_height.name
-
-    @property
-    def control_distribution_policy_label(self) -> str:
-        return self.config.control_distribution.name
 
 
 @dataclass(frozen=True)
@@ -265,21 +231,6 @@ class AJLCompiler:
         """Return the Level-2 logical width required by one braid word."""
 
         return self._layout(word).logical_qubits
-
-    def __getattr__(self, name: str):
-        # Register widths became word-dependent when lane allocation started
-        # following the schedule instead of the policy's lane budget. Returning
-        # a capacity-based number here would resurrect exactly the over-count
-        # that change removed, so these names fail with the migration instead.
-        replacement = _REMOVED_WIDTH_ATTRIBUTES.get(name)
-        if replacement is None:
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}"
-            )
-        raise AttributeError(
-            f"AJLCompiler.{name} was removed because it is now word-dependent; "
-            f"use {replacement}"
-        )
 
     def _validate_lane_capacity(self, raw_capacity: object) -> int:
         if isinstance(raw_capacity, bool):

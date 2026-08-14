@@ -11,7 +11,6 @@ from qiskit.quantum_info import Statevector
 from digital_compiler import (
     AJLCompiler,
     AJLPathModel,
-    BraidGenerator,
     CleanAncillaMCX,
     CompilerConfig,
     DenseAJLReference,
@@ -618,34 +617,3 @@ def test_compilation_info_reports_one_column_per_compiler_level(capsys) -> None:
     assert "MCPhase" in output
     assert "gate: measure" not in output
     assert "measurements" in output
-
-
-def test_removed_width_attributes_fail_with_their_replacement() -> None:
-    compiler = AJLCompiler(AJLPathModel(2, 5))
-
-    for name, hint in (
-        ("logical_qubits", "logical_qubits_for"),
-        ("parallel_lanes", "lane_capacity"),
-        ("work_qubits", "work_qubits_per_lane"),
-        ("height_qubits", "height_selector_qubits"),
-        ("height_register_qubits", "height_register_qubits"),
-        ("control_fanout_qubits", "control_fanout_qubits"),
-        ("controlled_varphi_gate", "local_controlled_varphi_gate"),
-    ):
-        with pytest.raises(AttributeError, match=hint):
-            getattr(compiler, name)
-
-    with pytest.raises(AttributeError, match="no attribute 'nonsense'"):
-        compiler.nonsense
-
-
-def test_deprecated_varphi_shim_still_builds_the_legacy_block() -> None:
-    from digital_compiler import controlled_varphi_gate, local_controlled_varphi_gate
-
-    generator = BraidGenerator(1, 1)
-    with pytest.deprecated_call():
-        legacy = controlled_varphi_gate(generator, 4)
-
-    assert legacy.num_qubits == 5
-    assert legacy.name == local_controlled_varphi_gate(generator, 2).name
-    assert legacy.num_qubits == local_controlled_varphi_gate(generator, 2).num_qubits

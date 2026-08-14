@@ -15,8 +15,8 @@ from digital_compiler import (
     BraidWord,
     CliffordTConfig,
     CompilerConfig,
+    JonesProblem,
     assert_clifford_t_contract,
-    evaluate_jones,
 )
 
 TOL = 1e-9
@@ -52,12 +52,7 @@ class WrongShotSampler(BaseSamplerV2):
 
 @pytest.mark.parametrize("circuit_level", [2, 3])
 def test_exact_hopf_evaluation_matches_analytic_value(circuit_level: int) -> None:
-    result = evaluate_jones(
-        "s1^2",
-        strands=2,
-        k=5,
-        circuit_level=circuit_level,
-    )
+    result = JonesProblem("s1^2", strands=2, k=5).evaluate(circuit_level=circuit_level)
     expected = -(result.model.A**10) - result.model.A**2
 
     assert abs(result.value - expected) < TOL
@@ -91,7 +86,7 @@ def test_exact_hopf_evaluation_matches_analytic_value(circuit_level: int) -> Non
 
 
 def test_exact_sigma3_squared_four_strand_evaluation() -> None:
-    result = evaluate_jones("s3^2", strands=4, k=5)
+    result = JonesProblem("s3^2", strands=4, k=5).evaluate()
     expected = result.model.d**2 * (
         -(result.model.A**10) - result.model.A**2
     )
@@ -116,14 +111,13 @@ def test_identity_braid_evaluates_the_unlink() -> None:
 def test_exact_four_strand_plat_uses_only_the_alternating_path(
     circuit_level: int,
 ) -> None:
-    result = evaluate_jones(
+    result = JonesProblem(
         BraidWord.identity(),
         strands=4,
         k=5,
         closure="plat",
-        plat_writhe=0,
-        circuit_level=circuit_level,
-    )
+        writhe=0,
+    ).evaluate(circuit_level=circuit_level)
 
     assert result.value == pytest.approx(result.model.d)
     assert result.closure == "plat"
@@ -141,7 +135,7 @@ def test_exact_four_strand_plat_uses_only_the_alternating_path(
     "closure_options",
     [
         {},
-        {"closure": "plat", "plat_writhe": -1},
+        {"closure": "plat", "writhe": -1},
     ],
 )
 def test_level_4_statevector_evaluation_respects_synthesis_bound(
@@ -149,19 +143,13 @@ def test_level_4_statevector_evaluation_respects_synthesis_bound(
 ) -> None:
     config = CompilerConfig(level4=CliffordTConfig(1e-3))
     word = "s1^2" if not closure_options else "s1"
-    level_3 = evaluate_jones(
+    level_3 = JonesProblem(word, strands=2, **closure_options).evaluate(circuit_level=3)
+    level_4 = JonesProblem(
         word,
         strands=2,
-        circuit_level=3,
-        **closure_options,
-    )
-    level_4 = evaluate_jones(
-        word,
-        strands=2,
-        circuit_level=4,
         config=config,
         **closure_options,
-    )
+    ).evaluate(circuit_level=4)
 
     assert level_4.value_synthesis_error_bound is not None
     assert (
@@ -174,12 +162,11 @@ def test_level_4_statevector_evaluation_respects_synthesis_bound(
 
 
 def test_exact_level_4_evaluation_reports_zero_synthesis_bound() -> None:
-    result = evaluate_jones(
+    result = JonesProblem(
         BraidWord.identity(),
         strands=2,
-        circuit_level=4,
         config=CompilerConfig(level4=CliffordTConfig(1e-3)),
-    )
+    ).evaluate(circuit_level=4)
 
     assert result.synthesis_error_budget_per_circuit == 1e-3
     assert result.value_synthesis_error_bound == 0.0
@@ -196,15 +183,16 @@ def test_level_4_trace_shots_preserve_batching_and_sampling() -> None:
         * confidence_factor
         / target_additive_error**2
     )
-    result = evaluate_jones(
+    result = JonesProblem(
         "s1^2",
         strands=2,
+        config=CompilerConfig(level4=CliffordTConfig(1e-3)),
+    ).evaluate(
         method="shots",
         circuit_level=4,
         target_additive_error=target_additive_error,
         path_seed=13,
         sampler=sampler,
-        config=CompilerConfig(level4=CliffordTConfig(1e-3)),
     )
 
     assert len(sampler.calls) == 1
@@ -226,18 +214,16 @@ def test_level_4_trace_shots_preserve_batching_and_sampling() -> None:
 
 
 def test_level_4_plat_shots_are_seeded_and_use_two_circuits() -> None:
-    kwargs = {
-        "strands": 2,
-        "closure": "plat",
-        "plat_writhe": -1,
-        "method": "shots",
-        "circuit_level": 4,
-        "shots": 64,
-        "seed": 41,
-        "config": CompilerConfig(level4=CliffordTConfig(1e-3)),
-    }
-    first = evaluate_jones("s1", **kwargs)
-    second = evaluate_jones("s1", **kwargs)
+    problem = JonesProblem(
+        "s1",
+        strands=2,
+        closure="plat",
+        writhe=-1,
+        config=CompilerConfig(level4=CliffordTConfig(1e-3)),
+    )
+    kwargs = {"method": "shots", "circuit_level": 4, "shots": 64, "seed": 41}
+    first = problem.evaluate(**kwargs)
+    second = problem.evaluate(**kwargs)
 
     assert first.value == second.value
     assert first.path_estimates == second.path_estimates
@@ -247,11 +233,7 @@ def test_level_4_plat_shots_are_seeded_and_use_two_circuits() -> None:
 
 
 def test_plat_uses_oriented_closure_writhe_not_braid_exponent_sum() -> None:
-    result = evaluate_jones(
-        "s1",
-        strands=2,
-        closure="plat",
-        plat_writhe=-1,
+    result = JonesProblem("s1", strands=2, closure="plat", writhe=-1).evaluate(
         circuit_level=2,
     )
 
@@ -261,16 +243,10 @@ def test_plat_uses_oriented_closure_writhe_not_braid_exponent_sum() -> None:
 
 
 def test_seeded_shot_evaluation_is_reproducible_and_reports_cost() -> None:
-    kwargs = {
-        "strands": 2,
-        "k": 5,
-        "method": "shots",
-        "circuit_level": 2,
-        "shots": 10_000,
-        "seed": 23,
-    }
-    first = evaluate_jones("s1^2", **kwargs)
-    second = evaluate_jones("s1^2", **kwargs)
+    problem = JonesProblem("s1^2", strands=2, k=5)
+    kwargs = {"method": "shots", "circuit_level": 2, "shots": 10_000, "seed": 23}
+    first = problem.evaluate(**kwargs)
+    second = problem.evaluate(**kwargs)
     expected = -(first.model.A**10) - first.model.A**2
 
     assert first.value == second.value
@@ -312,9 +288,7 @@ def test_seeded_shot_evaluation_is_reproducible_and_reports_cost() -> None:
 def test_explicit_shots_report_the_bound_at_requested_confidence() -> None:
     shots = 512
     success_probability = 0.99
-    result = evaluate_jones(
-        "s1^2",
-        strands=2,
+    result = JonesProblem("s1^2", strands=2).evaluate(
         method="shots",
         circuit_level=2,
         shots=shots,
@@ -364,9 +338,7 @@ def test_trace_target_additive_error_selects_minimal_shots() -> None:
 
 
 def test_shot_uncertainties_are_propagated_to_jones_components() -> None:
-    result = evaluate_jones(
-        "s1^2",
-        strands=2,
+    result = JonesProblem("s1^2", strands=2).evaluate(
         method="shots",
         circuit_level=2,
         shots=2048,
@@ -392,9 +364,7 @@ def test_shot_uncertainties_are_propagated_to_jones_components() -> None:
 
 def test_custom_sampler_receives_one_batched_job() -> None:
     sampler = RecordingSampler()
-    result = evaluate_jones(
-        "s1^2",
-        strands=2,
+    result = JonesProblem("s1^2", strands=2).evaluate(
         method="shots",
         shots=128,
         sampler=sampler,
@@ -417,9 +387,7 @@ def test_trace_shots_do_not_enumerate_valid_paths(monkeypatch) -> None:
         raise AssertionError("trace shot evaluation enumerated valid paths")
 
     monkeypatch.setattr(AJLPathModel, "valid_paths", fail_enumeration)
-    result = evaluate_jones(
-        BraidWord.identity(),
-        strands=4,
+    result = JonesProblem(BraidWord.identity(), strands=4).evaluate(
         method="shots",
         circuit_level=2,
         shots=32,
@@ -437,17 +405,13 @@ def test_trace_shots_do_not_enumerate_valid_paths(monkeypatch) -> None:
 
 
 def test_custom_sampler_can_use_an_independent_path_seed() -> None:
-    first = evaluate_jones(
-        "s1^2",
-        strands=2,
+    first = JonesProblem("s1^2", strands=2).evaluate(
         method="shots",
         shots=128,
         path_seed=37,
         sampler=RecordingSampler(seed=5),
     )
-    second = evaluate_jones(
-        "s1^2",
-        strands=2,
+    second = JonesProblem("s1^2", strands=2).evaluate(
         method="shots",
         shots=128,
         path_seed=37,
@@ -460,9 +424,7 @@ def test_custom_sampler_can_use_an_independent_path_seed() -> None:
 
 def test_trace_sampler_rejects_wrong_per_pub_shot_counts() -> None:
     with pytest.raises(ValueError, match="shots but .* were requested"):
-        evaluate_jones(
-            "s1^2",
-            strands=2,
+        JonesProblem("s1^2", strands=2).evaluate(
             method="shots",
             shots=128,
             path_seed=13,
@@ -476,17 +438,10 @@ def test_sampled_component_rejects_a_malformed_result() -> None:
 
 
 def test_sampled_plat_is_reproducible_and_propagates_its_normalization() -> None:
-    kwargs = {
-        "strands": 2,
-        "closure": "plat",
-        "plat_writhe": -1,
-        "method": "shots",
-        "circuit_level": 2,
-        "shots": 2048,
-        "seed": 41,
-    }
-    first = evaluate_jones("s1", **kwargs)
-    second = evaluate_jones("s1", **kwargs)
+    problem = JonesProblem("s1", strands=2, closure="plat", writhe=-1)
+    kwargs = {"method": "shots", "circuit_level": 2, "shots": 2048, "seed": 41}
+    first = problem.evaluate(**kwargs)
+    second = problem.evaluate(**kwargs)
     estimate = first.path_estimates[0]
     factor = first.model.plat_closure_jones(1.0, writhe=-1)
     expected_real_error = math.sqrt(
@@ -524,11 +479,7 @@ def test_plat_target_additive_error_selects_minimal_shots() -> None:
     expected_shots = math.ceil(
         4.0 * confidence_factor / target_additive_error**2
     )
-    result = evaluate_jones(
-        "s1",
-        strands=2,
-        closure="plat",
-        plat_writhe=-1,
+    result = JonesProblem("s1", strands=2, closure="plat", writhe=-1).evaluate(
         method="shots",
         circuit_level=2,
         target_additive_error=target_additive_error,
@@ -549,11 +500,7 @@ def test_plat_target_additive_error_selects_minimal_shots() -> None:
 
 def test_custom_sampler_batches_only_two_plat_circuits() -> None:
     sampler = RecordingSampler()
-    result = evaluate_jones(
-        "s1",
-        strands=2,
-        closure="plat",
-        plat_writhe=-1,
+    result = JonesProblem("s1", strands=2, closure="plat", writhe=-1).evaluate(
         method="shots",
         circuit_level=2,
         shots=128,
@@ -565,9 +512,7 @@ def test_custom_sampler_batches_only_two_plat_circuits() -> None:
 
 
 def test_shot_mode_uses_documented_default() -> None:
-    result = evaluate_jones(
-        BraidWord.identity(),
-        strands=2,
+    result = JonesProblem(BraidWord.identity(), strands=2).evaluate(
         method="shots",
         circuit_level=2,
         seed=3,
@@ -586,17 +531,6 @@ def test_shot_mode_uses_documented_default() -> None:
     [
         ({"method": "invalid"}, "method must be"),
         ({"circuit_level": 1}, "circuit_level must be"),
-        ({"closure": "invalid"}, "closure must be"),
-        ({"closure": "plat"}, "plat_writhe is required"),
-        ({"plat_writhe": 0}, "plat_writhe can only"),
-        (
-            {"closure": "plat", "plat_writhe": 1.5},
-            "plat_writhe must be an integer",
-        ),
-        (
-            {"closure": "plat", "plat_writhe": True},
-            "plat_writhe must be an integer",
-        ),
         ({"method": "shots", "shots": 0}, "shots must be"),
         ({"method": "shots", "shots": 1.5}, "shots must be"),
         ({"shots": 10}, "shots can only"),
@@ -666,15 +600,6 @@ def test_shot_mode_uses_documented_default() -> None:
         ({"path_seed": 4}, "path_seed can only"),
         ({"sampler": RecordingSampler()}, "sampler can only"),
         (
-            {
-                "method": "shots",
-                "closure": "plat",
-                "plat_writhe": 0,
-                "path_seed": 4,
-            },
-            "path_seed can only",
-        ),
-        (
             {"method": "shots", "path_seed": -1},
             "path_seed must be",
         ),
@@ -694,19 +619,21 @@ def test_shot_mode_uses_documented_default() -> None:
 )
 def test_invalid_evaluation_options_are_rejected(kwargs, message: str) -> None:
     with pytest.raises((TypeError, ValueError), match=message):
-        evaluate_jones("s1^2", strands=2, **kwargs)
+        JonesProblem("s1^2", strands=2).evaluate(**kwargs)
+
+
+def test_plat_shots_reject_a_path_seed() -> None:
+    plat = JonesProblem("s1^2", strands=2, closure="plat", writhe=0)
+
+    with pytest.raises(ValueError, match="path_seed can only"):
+        plat.evaluate(method="shots", path_seed=4)
 
 
 def test_declared_strands_must_support_the_braid_word() -> None:
     with pytest.raises(ValueError, match="needs 4 strands"):
-        evaluate_jones("s3", strands=3)
+        JonesProblem("s3", strands=3).evaluate()
 
 
 def test_plat_closure_rejects_odd_strand_counts() -> None:
     with pytest.raises(ValueError, match="even number of strands"):
-        evaluate_jones(
-            "s1^2",
-            strands=3,
-            closure="plat",
-            plat_writhe=0,
-        )
+        JonesProblem("s1^2", strands=3, closure="plat", writhe=0).evaluate()

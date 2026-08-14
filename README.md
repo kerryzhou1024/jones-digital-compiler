@@ -384,38 +384,9 @@ scheduler prioritizes generators on the longest remaining dependency paths.
 Prefix-height computation may still limit the depth improvement when
 simultaneous generators have overlapping prefixes.
 
+Custom `PrefixHeightPolicy` and `ControlDistributionPolicy` implementations
+receive the allocated lane count as `lanes`.
+
 See `../notebooks/parallel-generators.ipynb` for the scheduling and
 control-distribution experiments, and `../notebooks/compiler-demo.ipynb` for a
 complete walkthrough.
-
-## Migration: lane right-sizing
-
-Height, workspace, and control-fanout registers used to be sized from the
-scheduling policy's lane budget, so a braid word that never ran two generators
-together still paid for `strands // 2` height lanes. They are now sized from
-the widest layer the schedule actually runs. Gate counts, depths, schedules,
-and prefix-height routes are unchanged; only qubit counts move, and only
-downward.
-
-Because those widths are now word-dependent, the matching `AJLCompiler`
-attributes were removed rather than left returning the old over-count.
-Accessing one raises `AttributeError` naming its replacement:
-
-| Removed | Use instead |
-| --- | --- |
-| `compiler.logical_qubits` | `compiler.logical_qubits_for(word)`, or `circuit.num_qubits` |
-| `compiler.parallel_lanes` | `compiler.lane_capacity` (budget) or `circuit.metadata["parallel_lanes"]` (used) |
-| `compiler.work_qubits` | `compiler.work_qubits_per_lane`, or `metadata["compiler_config"]["workspace_qubits"]` |
-| `compiler.height_register_qubits` | `metadata["compiler_config"]["height_register_qubits"]` |
-| `compiler.control_fanout_qubits` | `metadata["compiler_config"]["control_fanout_qubits"]` |
-| `compiler.height_qubits` | `compiler.height_selector_qubits` |
-| `compiler.controlled_varphi_gate(...)` | `local_controlled_varphi_gate(generator, height_qubits)` |
-
-Circuit metadata drops `active_parallel_width`; `parallel_lanes` now reports
-the lanes a circuit uses, and `compiler_config["lane_capacity"]` reports the
-budget the policy allowed. The module-level `controlled_varphi_gate` remains
-as a deprecated shim and will be removed in the next release.
-
-Custom `PrefixHeightPolicy` and `ControlDistributionPolicy` implementations
-receive the allocated lane count. The arguments are now named `lanes` rather
-than `lane_capacity`; positional implementations are unaffected.
