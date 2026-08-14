@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
+from qiskit.circuit import Clbit, Qubit
 
 from .fault_tolerance import (
     CliffordTCompilation,
@@ -158,6 +159,23 @@ class _Layout:
         )
 
 
+@dataclass(frozen=True)
+class _Registers:
+    """A freshly allocated circuit and the qubits its builder writes to.
+
+    ``control`` and ``measurement`` are the single control qubit and readout
+    bit rather than their registers, and the lowering workspace is absent
+    because only the lowerer reaches it -- by register name, from the circuit.
+    """
+
+    circuit: QuantumCircuit
+    path: QuantumRegister
+    height: QuantumRegister
+    control: Qubit | None = None
+    fanout: tuple[Qubit, ...] = ()
+    measurement: Clbit | None = None
+
+
 class AJLCompiler:
     """Compile AJL braid words through explicit semantic and lowering layers."""
 
@@ -261,61 +279,79 @@ class AJLCompiler:
         metadata["control_fanout_qubits"] = layout.fanout_qubits
         return metadata
 
-    def _new_hadamard_circuit(self, name: str, layout: _Layout):
-        control = QuantumRegister(1, "ctrl")
+    def _new_circuit(
+        self,
+        name: str,
+        layout: _Layout,
+        *,
+        controlled: bool,
+        readout: bool,
+    ) -> _Registers:
+        """Allocate a lowerable circuit: control, path, height, workspace, fanout.
+
+        ``readout`` allocates the 1-bit readout register that makes this a
+        Hadamard-test component; whether the measurement is applied is the
+        caller's choice.
+        """
+
+        control = QuantumRegister(1, "ctrl") if controlled else None
         path = QuantumRegister(self.strands, "path")
         height = QuantumRegister(layout.height_qubits, "height")
         work = QuantumRegister(layout.work_qubits, "adder_work")
-        control_fanout = (
+        fanout = (
+            QuantumRegister(layout.fanout_qubits, "ctrl_fanout")
+            if controlled and layout.fanout_qubits
+            else None
+        )
+        measurement = ClassicalRegister(1, "meas") if readout else None
+        return self._assemble(
+            name,
+            (control, path, height, work, fanout),
+            measurement,
+        )
+
+    def _new_level_1_circuit(self, name: str, layout: _Layout) -> _Registers:
+        """Allocate a semantic circuit: no lowering workspace, fanout beside the control."""
+
+        control = QuantumRegister(1, "ctrl")
+        fanout = (
             QuantumRegister(layout.fanout_qubits, "ctrl_fanout")
             if layout.fanout_qubits
             else None
         )
-        measurement = ClassicalRegister(1, "meas")
-        registers = [control, path, height, work]
-        if control_fanout is not None:
-            registers.append(control_fanout)
-        circuit = QuantumCircuit(*registers, measurement, name=name)
-        fanout_qubits = [] if control_fanout is None else list(control_fanout)
-        return circuit, control, path, height, work, fanout_qubits, measurement
-
-    def _new_level_1_hadamard_circuit(self, name: str, layout: _Layout):
-        """Build a semantic circuit without lower-level workspace registers."""
-
-        control = QuantumRegister(1, "ctrl")
-        control_fanout = (
-            QuantumRegister(layout.fanout_qubits, "ctrl_fanout")
-            if layout.fanout_qubits
-            else None
+        path = QuantumRegister(self.strands, "path")
+        height = QuantumRegister(layout.height_qubits, "height")
+        return self._assemble(
+            name,
+            (control, fanout, path, height),
+            ClassicalRegister(1, "meas"),
         )
-        path = QuantumRegister(self.strands, "path")
-        height = QuantumRegister(layout.height_qubits, "height")
-        measurement = ClassicalRegister(1, "meas")
-        registers = [control]
-        if control_fanout is not None:
-            registers.append(control_fanout)
-        registers.extend((path, height))
-        circuit = QuantumCircuit(*registers, measurement, name=name)
-        fanout_qubits = [] if control_fanout is None else list(control_fanout)
-        return circuit, control, fanout_qubits, path, height, measurement
 
-    def _new_braid_circuit(self, name: str, layout: _Layout, controlled: bool = False):
-        registers = []
-        control = None
-        control_fanout = None
-        if controlled:
-            control = QuantumRegister(1, "ctrl")
-            registers.append(control)
-        path = QuantumRegister(self.strands, "path")
-        height = QuantumRegister(layout.height_qubits, "height")
-        work = QuantumRegister(layout.work_qubits, "adder_work")
-        registers.extend([path, height, work])
-        if controlled and layout.fanout_qubits:
-            control_fanout = QuantumRegister(layout.fanout_qubits, "ctrl_fanout")
-            registers.append(control_fanout)
-        circuit = QuantumCircuit(*registers, name=name)
-        fanout_qubits = [] if control_fanout is None else list(control_fanout)
-        return circuit, control, path, height, work, fanout_qubits
+    @staticmethod
+    def _assemble(
+        name: str,
+        quantum: Sequence[QuantumRegister | None],
+        measurement: ClassicalRegister | None,
+    ) -> _Registers:
+        """Build a circuit whose qubit order is the given register order."""
+
+        allocated = [register for register in quantum if register is not None]
+        by_name = {register.name: register for register in allocated}
+        circuit = QuantumCircuit(
+            *allocated,
+            *(() if measurement is None else (measurement,)),
+            name=name,
+        )
+        control = by_name.get("ctrl")
+        fanout = by_name.get("ctrl_fanout")
+        return _Registers(
+            circuit=circuit,
+            path=by_name["path"],
+            height=by_name["height"],
+            control=None if control is None else control[0],
+            fanout=() if fanout is None else tuple(fanout),
+            measurement=None if measurement is None else measurement[0],
+        )
 
     @staticmethod
     def validate_part(part: str) -> HadamardPart:
@@ -762,11 +798,13 @@ class AJLCompiler:
         layout = self._layout(word)
         policy_name = self.config.height.name
         prefix = "controlled_" if controlled else ""
-        circuit, control, path, height, _, control_fanout = self._new_braid_circuit(
+        registers = self._new_circuit(
             f"{prefix}level_2_braid_{policy_name}({layout.word})",
             layout,
             controlled=controlled,
+            readout=False,
         )
+        circuit = registers.circuit
         circuit.metadata = self._circuit_metadata(
             layout,
             "uncompute",
@@ -778,14 +816,14 @@ class AJLCompiler:
         if controlled:
             lane_controls = self.config.control_distribution.prepare(
                 circuit,
-                control[0],
-                control_fanout,
+                registers.control,
+                registers.fanout,
                 layout.lanes,
             )
         self._append_logical_plan(
             circuit,
-            path,
-            height,
+            registers.path,
+            registers.height,
             layout.word,
             layout.plan,
             lane_controls,
@@ -793,8 +831,8 @@ class AJLCompiler:
         if controlled:
             self.config.control_distribution.unprepare(
                 circuit,
-                control[0],
-                control_fanout,
+                registers.control,
+                registers.fanout,
                 layout.lanes,
             )
         assert_level_2_contract(circuit)
@@ -842,42 +880,41 @@ class AJLCompiler:
         layout = self._layout(word, self.config.final_height)
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
-        circuit, control, control_fanout, path, height, measurement = (
-            self._new_level_1_hadamard_circuit(f"level_1_varphi_{part}", layout)
-        )
+        registers = self._new_level_1_circuit(f"level_1_varphi_{part}", layout)
+        circuit = registers.circuit
         circuit.metadata = self._circuit_metadata(
             layout,
             self.config.final_height.name,
             compiler_level=1,
             gate_contract="ajl_level_1_semantic_blocks",
         )
-        prepare_basis_path(circuit, path, path_bits)
-        circuit.h(control[0])
+        prepare_basis_path(circuit, registers.path, path_bits)
+        circuit.h(registers.control)
         lane_controls = self.config.control_distribution.prepare(
             circuit,
-            control[0],
-            control_fanout,
+            registers.control,
+            registers.fanout,
             layout.lanes,
         )
         self._append_level_1_plan(
             circuit,
             lane_controls,
-            path,
-            height,
+            registers.path,
+            registers.height,
             layout.word,
             layout.plan,
         )
         self.config.control_distribution.unprepare(
             circuit,
-            control[0],
-            control_fanout,
+            registers.control,
+            registers.fanout,
             layout.lanes,
         )
         append_hadamard_readout(
             circuit,
-            control[0],
+            registers.control,
             part,
-            measurement[0] if measure else None,
+            registers.measurement if measure else None,
         )
         return circuit
 
@@ -892,18 +929,13 @@ class AJLCompiler:
         path_bits = self.model.coerce_path(initial_path)
         part = self.validate_part(part)
         policy_name = self.config.height.name
-        (
-            circuit,
-            control,
-            path,
-            height,
-            _,
-            control_fanout,
-            measurement,
-        ) = self._new_hadamard_circuit(
+        registers = self._new_circuit(
             f"level_2_multicontrolled_{policy_name}_{part}",
             layout,
+            controlled=True,
+            readout=True,
         )
+        circuit = registers.circuit
         circuit.metadata = self._circuit_metadata(
             layout,
             self.config.final_height.name,
@@ -911,33 +943,33 @@ class AJLCompiler:
             height_strategy=policy_name,
             gate_contract="ajl_multicontrolled",
         )
-        prepare_basis_path(circuit, path, path_bits)
-        circuit.h(control[0])
+        prepare_basis_path(circuit, registers.path, path_bits)
+        circuit.h(registers.control)
         lane_controls = self.config.control_distribution.prepare(
             circuit,
-            control[0],
-            control_fanout,
+            registers.control,
+            registers.fanout,
             layout.lanes,
         )
         self._append_logical_plan(
             circuit,
-            path,
-            height,
+            registers.path,
+            registers.height,
             layout.word,
             layout.plan,
             lane_controls,
         )
         self.config.control_distribution.unprepare(
             circuit,
-            control[0],
-            control_fanout,
+            registers.control,
+            registers.fanout,
             layout.lanes,
         )
         append_hadamard_readout(
             circuit,
-            control[0],
+            registers.control,
             part,
-            measurement[0] if measure else None,
+            registers.measurement if measure else None,
         )
         assert_level_2_contract(circuit)
         return circuit
