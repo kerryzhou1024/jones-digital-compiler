@@ -115,7 +115,7 @@ class FinalHeightPolicy(Protocol):
 
 @dataclass(frozen=True)
 class RetainFinalHeight:
-    """Leave final height selectors computed in terminal components."""
+    """Leave safe retired height selectors computed in terminal components."""
 
     name: str = "retain"
 
@@ -132,13 +132,80 @@ class RetainFinalHeight:
             raise ValueError(
                 "terminal prefix-height transitions must only unload live lanes"
             )
+
+        live: dict[int, int] = {}
+        generator_indices: list[tuple[int, ...]] = []
+        last_use: dict[int, tuple[int, int]] = {}
+        for layer_index, layer in enumerate(plan.layers):
+            for transition in layer.before:
+                if transition.target_index is None:
+                    live.pop(transition.lane, None)
+                else:
+                    live[transition.lane] = transition.target_index
+
+            layer_indices = tuple(live[item.lane] for item in layer.generators)
+            generator_indices.append(layer_indices)
+            for item in layer.generators:
+                last_use[item.lane] = (layer_index, live[item.lane])
+
+            for transition in layer.after:
+                if transition.target_index is None:
+                    live.pop(transition.lane, None)
+                else:
+                    live[transition.lane] = transition.target_index
+
+        retained_lanes = {
+            lane
+            for lane, (last_layer, height_index) in last_use.items()
+            if all(
+                height_index - 1 not in later_indices
+                for later_indices in generator_indices[last_layer + 1 :]
+            )
+        }
+
+        def keep_transition(
+            transition: PrefixHeightTransition,
+            *,
+            layer_index: int,
+            after: bool,
+        ) -> bool:
+            if (
+                transition.target_index is not None
+                or transition.lane not in retained_lanes
+            ):
+                return True
+            last_layer, height_index = last_use[transition.lane]
+            is_after_final_use = layer_index > last_layer or (
+                after and layer_index == last_layer
+            )
+            return not (
+                is_after_final_use and transition.source_index == height_index
+            )
+
         return PrefixHeightPlan(
-            (
-                *plan.layers[:-1],
+            tuple(
                 PrefixHeightLayerPlan(
-                    before=last.before,
-                    generators=last.generators,
-                ),
+                    before=tuple(
+                        transition
+                        for transition in layer.before
+                        if keep_transition(
+                            transition,
+                            layer_index=layer_index,
+                            after=False,
+                        )
+                    ),
+                    generators=layer.generators,
+                    after=tuple(
+                        transition
+                        for transition in layer.after
+                        if keep_transition(
+                            transition,
+                            layer_index=layer_index,
+                            after=True,
+                        )
+                    ),
+                )
+                for layer_index, layer in enumerate(plan.layers)
             )
         )
 
@@ -170,8 +237,8 @@ class PrefixHeightPolicy(Protocol):
     ``lanes`` is the number of height lanes the circuit allocates, which is
     the width of the widest scheduled layer -- not the scheduling policy's
     lane budget.  A plan may use lanes ``0 .. lanes - 1``, and the compiler
-    rejects any plan that leaves a lane live across a layer that does not use
-    it, so this count is always sufficient.
+    validates its clean route before a final-height policy may retain an idle
+    lane across generators that preserve the stored prefix.
     """
 
     name: str

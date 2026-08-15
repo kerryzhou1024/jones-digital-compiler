@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import escape
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -104,6 +104,9 @@ class CircuitInfo:
     level_4_resources: Mapping[str, object] | None
     compiler_policies: Mapping[str, object]
     scope_notes: tuple[str, ...]
+    gate_family_stats: Mapping[str, Mapping[str, int]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     @property
     def path_label(self) -> str:
@@ -136,6 +139,7 @@ class CircuitInfo:
             },
             "gates": {
                 "families": _thaw(self.gate_families),
+                "family_stats": _thaw(self.gate_family_stats),
                 "exact": _thaw(self.exact_gate_stats),
                 "clifford_t": _thaw(self.level_4_resources),
             },
@@ -189,7 +193,11 @@ class CircuitInfo:
 
     def __str__(self) -> str:
         family_rows = [
-            (family, count)
+            (
+                family,
+                count,
+                self.gate_family_stats.get(family, {}).get("depth", "n/a"),
+            )
             for family, count in self.gate_families.items()
         ]
         policy_rows = self._policy_rows()
@@ -197,7 +205,7 @@ class CircuitInfo:
             "Circuit info",
             _text_table(("field", "value"), self._summary_rows()),
             "\nGate families",
-            _text_table(("family", "count"), family_rows),
+            _text_table(("family", "count", "depth"), family_rows),
         ]
         if policy_rows:
             sections.extend(
@@ -215,7 +223,11 @@ class CircuitInfo:
 
     def _repr_html_(self) -> str:
         family_rows = [
-            (family, count)
+            (
+                family,
+                count,
+                self.gate_family_stats.get(family, {}).get("depth", "n/a"),
+            )
             for family, count in self.gate_families.items()
         ]
         policy_rows = self._policy_rows()
@@ -231,7 +243,7 @@ class CircuitInfo:
             "<h3>Circuit info</h3>"
             + _html_table(("field", "value"), self._summary_rows())
             + "<h4>Gate families</h4>"
-            + _html_table(("family", "count"), family_rows)
+            + _html_table(("family", "count", "depth"), family_rows)
             + policies
             + f"<h4>Scope</h4><ul>{notes}</ul></div>"
         )
@@ -436,13 +448,11 @@ def _exact_gate_stats(
     return sum(counts.values()), total_depth, by_gate
 
 
-def _gate_family_counts(
+def _gate_family_stats(
     circuit: QuantumCircuit,
     compiler_level: CompilerLevel,
-) -> dict[str, int]:
-    families: dict[str, int] = (
-        {"Clifford": 0, "T": 0} if compiler_level == 4 else {}
-    )
+) -> dict[str, dict[str, int]]:
+    counts: dict[str, int] = {"Clifford": 0, "T": 0} if compiler_level == 4 else {}
     for instruction in circuit.data:
         operation = instruction.operation
         if not isinstance(operation, Gate):
@@ -452,8 +462,25 @@ def _gate_family_counts(
             compiler_level,
             strict=compiler_level == 4,
         )
-        families[family] = families.get(family, 0) + 1
-    return dict(sorted(families.items()))
+        counts[family] = counts.get(family, 0) + 1
+
+    return {
+        family: {
+            "count": count,
+            "depth": circuit.depth(
+                lambda instruction, family=family: (
+                    isinstance(instruction.operation, Gate)
+                    and _gate_family(
+                        instruction.operation,
+                        compiler_level,
+                        strict=compiler_level == 4,
+                    )
+                    == family
+                )
+            ),
+        }
+        for family, count in sorted(counts.items())
+    }
 
 
 def _non_gate_operation_counts(circuit: QuantumCircuit) -> dict[str, int]:
@@ -498,6 +525,7 @@ def circuit_info(compiled: CompiledCircuit) -> CircuitInfo:
 
     circuit = compiled.circuit
     total_count, quantum_depth, exact_stats = _exact_gate_stats(circuit)
+    family_stats = _gate_family_stats(circuit, compiled.circuit_level)
     non_gate_operations = _non_gate_operation_counts(circuit)
     provenance = compiled._provenance
     if provenance is None:
@@ -524,8 +552,9 @@ def circuit_info(compiled: CompiledCircuit) -> CircuitInfo:
     ]
     if (circuit.metadata or {}).get("final_height_strategy") == "retain":
         scope_notes.append(
-            "Final height selectors are retained and may remain entangled; "
-            "treat this as a terminal basis-path Hadamard-test component."
+            "Safe retired height selectors are retained and may remain "
+            "entangled; treat this as a terminal basis-path Hadamard-test "
+            "component."
         )
     if compiled.circuit_level == 3:
         scope_notes.append(
@@ -578,8 +607,9 @@ def circuit_info(compiled: CompiledCircuit) -> CircuitInfo:
         measurement_count=non_gate_operations.get("measure", 0),
         non_gate_operations=_freeze(non_gate_operations),
         gate_families=_freeze(
-            _gate_family_counts(circuit, compiled.circuit_level)
+            {family: stats["count"] for family, stats in family_stats.items()}
         ),
+        gate_family_stats=_freeze(family_stats),
         exact_gate_stats=_freeze(exact_stats),
         level_4_resources=(
             None

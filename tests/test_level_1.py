@@ -333,6 +333,40 @@ def test_parallel_tree_fanout_is_real_and_drawn_from_the_circuit() -> None:
     assert circuit.depth() == original_depth
 
 
+def test_parallel_svg_omits_safe_retired_height_uncompute() -> None:
+    config = CompilerConfig(
+        scheduling=CommutingLayerScheduling(max_lanes=None),
+    )
+    compiled = JonesProblem(
+        "1 3 2 5",
+        strands=6,
+        k=5,
+        config=config,
+    ).circuit(
+        "101010",
+        "real",
+        circuit_level=1,
+        measure=False,
+    )
+    circuit = compiled.circuit
+
+    assert circuit.metadata["generator_layers"] == ((1, 3, 5), (2,))
+    assert circuit.metadata["prefix_height_unloads"] == 0
+    assert circuit.metadata["prefix_height_path_steps"] == 7
+    assert sum(circuit.count_ops().values()) == 12
+    assert circuit.depth() == 8
+    assert "level_1_adder_minus_1_2_3_4" not in circuit.count_ops()
+    assert circuit.count_ops()["level_1_adder_minus_2"] == 1
+
+    svg = _level_1_svg(circuit)
+
+    assert svg is not None
+    assert "Adder†₁,₂,₃,₄" not in svg
+    assert "Adder†₂" in svg
+    assert "Layer 1: σ₁ ∥ σ₃ ∥ σ₅" in svg
+    assert "Layer 2: σ₂" in svg
+
+
 def test_four_lane_fanout_draws_one_control_with_three_targets() -> None:
     config = CompilerConfig(
         scheduling=CommutingLayerScheduling(),

@@ -62,6 +62,14 @@ def test_level_3_trace_and_plat_resource_regressions() -> None:
         "Rz": 12,
         "X": 1,
     }
+    assert trace.gate_family_stats == {
+        "CNOT": {"count": 28, "depth": 28},
+        "CRz": {"count": 2, "depth": 2},
+        "H": {"count": 2, "depth": 2},
+        "Ry": {"count": 12, "depth": 12},
+        "Rz": {"count": 12, "depth": 10},
+        "X": {"count": 1, "depth": 1},
+    }
     assert trace.exact_gate_stats["rz"] == {"count": 12, "depth": 10}
 
     assert (
@@ -128,6 +136,7 @@ def test_report_recomputes_and_unknown_gates_fall_back_to_exact_names() -> None:
 
     assert after.quantum_gate_count == before.quantum_gate_count + 1
     assert after.gate_families["research_custom"] == 1
+    assert after.gate_family_stats["research_custom"]["count"] == 1
     assert after.exact_gate_stats["research_custom"]["count"] == 1
 
 
@@ -153,8 +162,14 @@ def test_report_is_immutable_structured_and_has_deterministic_rich_output() -> N
     assert first_dict["compiler"]["prefix_height_moves"] == 0
     assert first_dict["compiler"]["prefix_height_unloads"] == 0
     assert first_dict["compiler"]["prefix_height_path_steps"] == 0
+    assert first_dict["gates"]["family_stats"]["Rz"] == {
+        "count": 12,
+        "depth": 10,
+    }
     assert "not the complete closure workload" in str(report)
+    assert "family  count  depth" in str(report)
     assert "terminal basis-path Hadamard-test component" in str(report)
+    assert "<th>depth</th>" in report._repr_html_()
     assert "not a final Clifford+T estimate" in report._repr_html_()
     assert str(report) == str(report)
 
@@ -162,6 +177,8 @@ def test_report_is_immutable_structured_and_has_deterministic_rich_output() -> N
     assert report.gate_families["CNOT"] == 28
     with pytest.raises(TypeError):
         report.gate_families["CNOT"] = -1
+    with pytest.raises(TypeError):
+        report.gate_family_stats["CNOT"]["depth"] = -1
     with pytest.raises(TypeError):
         report.exact_gate_stats["cx"]["count"] = -1
     with pytest.raises(FrozenInstanceError):

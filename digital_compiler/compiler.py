@@ -532,6 +532,7 @@ class AJLCompiler:
             lanes,
             finalized,
             require_clean_completion=final_height.clean_at_completion,
+            allow_retained_inactive=not final_height.clean_at_completion,
         )
         return finalized
 
@@ -543,6 +544,7 @@ class AJLCompiler:
         plan: PrefixHeightPlan,
         *,
         require_clean_completion: bool = True,
+        allow_retained_inactive: bool = False,
     ) -> None:
         if not isinstance(plan, PrefixHeightPlan):
             raise ValueError("a prefix-height policy must return a PrefixHeightPlan")
@@ -610,10 +612,22 @@ class AJLCompiler:
             dirty_lanes = {
                 lane for lane, index in enumerate(lane_state) if index is not None
             }
-            if dirty_lanes != active_lanes:
+            inactive_lanes = dirty_lanes - active_lanes
+            if inactive_lanes and not allow_retained_inactive:
                 raise ValueError(
                     "a prefix-height plan must clean every inactive lane before a layer"
                 )
+            for lane in inactive_lanes:
+                height_index = lane_state[lane]
+                assert height_index is not None
+                if any(
+                    word.generators[item.position].index == height_index - 1
+                    for item in routed_layer.generators
+                ):
+                    raise ValueError(
+                        "a retained inactive prefix-height lane is invalidated by "
+                        "a generator crossing its boundary"
+                    )
 
             for transition in routed_layer.after:
                 apply_transition(transition)
