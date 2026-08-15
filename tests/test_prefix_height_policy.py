@@ -53,7 +53,7 @@ def test_identity_and_single_generator_routes(policy) -> None:
     [RollingPrefixHeight(), RecomputePrefixHeight()],
 )
 @pytest.mark.parametrize("word", ["", "1", "3"])
-def test_final_height_policies_only_change_terminal_unloads(
+def test_final_height_policies_change_only_safe_terminal_unloads(
     prefix_policy,
     word: str,
 ) -> None:
@@ -75,6 +75,48 @@ def test_final_height_policies_only_change_terminal_unloads(
     assert retained.layers[-1].after == ()
     assert retained.unloads == clean.unloads - len(clean.layers[-1].after)
     assert retained.path_steps == clean.path_steps - terminal_steps
+
+
+@pytest.mark.parametrize(
+    "prefix_policy,clean_resources,retained_resources",
+    [
+        (RollingPrefixHeight(), (3, 1, 3, 12), (3, 1, 0, 7)),
+        (RecomputePrefixHeight(), (4, 0, 4, 14), (4, 0, 2, 9)),
+    ],
+)
+def test_retain_prunes_only_safe_retired_lane_unloads(
+    prefix_policy,
+    clean_resources: tuple[int, int, int, int],
+    retained_resources: tuple[int, int, int, int],
+) -> None:
+    word = BraidWord.parse("1 3 2 5")
+    schedule = CommutingLayerScheduling().schedule(word, strands=6)
+    clean = prefix_policy.route(word, schedule, lanes=3)
+    retained = RetainFinalHeight().finalize(clean)
+
+    assert schedule == ((0, 1, 3), (2,))
+    assert (clean.loads, clean.moves, clean.unloads, clean.path_steps) == (
+        clean_resources
+    )
+    assert (
+        retained.loads,
+        retained.moves,
+        retained.unloads,
+        retained.path_steps,
+    ) == retained_resources
+
+    unsafe_word = BraidWord.parse("1 3 2 1 1 3 2")
+    unsafe_schedule = CommutingLayerScheduling().schedule(unsafe_word, strands=4)
+    unsafe_clean = prefix_policy.route(unsafe_word, unsafe_schedule, lanes=2)
+    unsafe_retained = RetainFinalHeight().finalize(unsafe_clean)
+
+    # The lane holding H_3 must be erased before the final sigma_2 crosses its
+    # prefix boundary, even though that lane will never be used again.
+    assert any(
+        transition.source_index == 3 and transition.target_index is None
+        for layer in unsafe_retained.layers[:-1]
+        for transition in (*layer.before, *layer.after)
+    )
 
 
 def test_default_final_height_policy_is_retain() -> None:
@@ -259,6 +301,60 @@ def test_compiler_rejects_a_prefix_height_plan_that_parks_an_idle_lane() -> None
     # second while the lane holding the prefix height of index 3 sits idle.
     with pytest.raises(ValueError, match="clean every inactive lane before a layer"):
         compiler.level_2_braid_circuit("1 3 2")
+
+
+class UnsafeBoundaryRetention:
+    """Deliberately retain H_3 across a later sigma_2 boundary crossing."""
+
+    name = "test_unsafe_boundary_retention"
+    clean_at_completion = False
+
+    @staticmethod
+    def finalize(plan):
+        return PrefixHeightPlan(
+            tuple(
+                PrefixHeightLayerPlan(
+                    before=tuple(
+                        transition
+                        for transition in layer.before
+                        if not (
+                            transition.source_index == 3
+                            and transition.target_index is None
+                        )
+                    ),
+                    generators=layer.generators,
+                    after=tuple(
+                        transition
+                        for transition in layer.after
+                        if not (
+                            transition.source_index == 3
+                            and transition.target_index is None
+                        )
+                    ),
+                )
+                for layer in plan.layers
+            )
+        )
+
+    def metadata(self):
+        return {"name": self.name}
+
+
+def test_compiler_rejects_unsafe_retained_height_boundary() -> None:
+    compiler = AJLCompiler(
+        AJLPathModel(4, 5),
+        CompilerConfig(
+            scheduling=CommutingLayerScheduling(max_lanes=2),
+            final_height=UnsafeBoundaryRetention(),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="generator crossing its boundary"):
+        compiler.level_2_multicontrolled_circuit(
+            "1 3 2 1 1 3 2",
+            "1010",
+            measure=False,
+        )
 
 
 def test_rolling_routes_never_park_an_idle_lane_across_a_layer() -> None:

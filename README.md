@@ -318,12 +318,13 @@ from digital_compiler import CompilerConfig, RecomputePrefixHeight
 baseline = CompilerConfig(prefix_height=RecomputePrefixHeight())
 ```
 
-Complete basis-path Hadamard-test components retain their final computed
-height selectors by default. This omits only the terminal unload after the
-last generator; intermediate lane cleanup is unchanged. The component is
-therefore terminal: its control expectation remains valid, but its path and
-height registers must not be reused coherently. Request the former clean
-component boundary explicitly when needed:
+Complete basis-path Hadamard-test components retain safe retired height
+selectors by default. A lane holding prefix height `H_m` may skip its final
+unload when no later `sigma_(m-1)` crosses that prefix boundary; required
+intermediate cleanup is preserved. The component is therefore terminal: its
+control expectation remains valid, but its path and height registers must not
+be reused coherently. Request the former clean component boundary explicitly
+when needed:
 
 ```python
 from digital_compiler import CompilerConfig, UncomputeFinalHeight

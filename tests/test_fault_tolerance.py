@@ -11,6 +11,7 @@ from digital_compiler import (
     AJLPathModel,
     CliffordTCompiler,
     CliffordTConfig,
+    CommutingLayerScheduling,
     CompilerConfig,
     JonesProblem,
     assert_clifford_t_contract,
@@ -121,6 +122,29 @@ def test_level_4_preserves_registers_and_reports_resources() -> None:
     repeated = compiler.compile_hadamard_test("s1", "10", measure=True)
     assert repeated.level_4_clifford_t == compilation.level_4_clifford_t
     assert repeated.level_4_resources == compilation.level_4_resources
+
+
+def test_level_4_inherits_safe_retired_height_route() -> None:
+    config = CompilerConfig(
+        scheduling=CommutingLayerScheduling(max_lanes=None),
+        level4=CliffordTConfig(synthesis_error_budget=1e-2),
+    )
+    circuit = JonesProblem(
+        "1 3 2 5",
+        strands=6,
+        k=5,
+        config=config,
+    ).circuit(
+        "101010",
+        "real",
+        circuit_level=4,
+        measure=False,
+    )
+
+    assert_clifford_t_contract(circuit.circuit)
+    assert circuit.metadata["generator_layers"] == ((1, 3, 5), (2,))
+    assert circuit.metadata["prefix_height_unloads"] == 0
+    assert circuit.metadata["prefix_height_path_steps"] == 7
 
 
 def test_level_4_operator_error_respects_the_component_budget() -> None:

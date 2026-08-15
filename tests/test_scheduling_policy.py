@@ -378,6 +378,86 @@ def test_parallel_hadamard_test_matches_dense_with_retained_height(
     ) == register_signature(compilation.level_3_single_control)
 
 
+@pytest.mark.parametrize("part", ["real", "imag"])
+@pytest.mark.parametrize(
+    "prefix_height",
+    [RollingPrefixHeight(), RecomputePrefixHeight()],
+)
+@pytest.mark.parametrize(
+    "control_distribution",
+    [SharedControl(), TreeControlFanout()],
+)
+@pytest.mark.parametrize(
+    "word,path,strands",
+    [
+        ("1 3 2 5", "101010", 6),
+        ("1 3 2 1 1 3 2", "1010", 4),
+    ],
+)
+def test_retired_height_components_match_dense_across_policies(
+    part: str,
+    prefix_height,
+    control_distribution,
+    word: str,
+    path: str,
+    strands: int,
+) -> None:
+    model = AJLPathModel(strands, 5)
+    compiler = AJLCompiler(
+        model,
+        parallel_config(
+            prefix_height=prefix_height,
+            control_distribution=control_distribution,
+        ),
+    )
+    compilation = compiler.compile_hadamard_test(
+        word,
+        path,
+        part,
+        measure=False,
+    )
+    amplitude = DenseAJLReference(model).path_amplitude(word, path)
+    expected = amplitude.real if part == "real" else amplitude.imag
+
+    for circuit in (
+        compilation.level_2_multicontrolled,
+        compilation.level_3_single_control,
+    ):
+        state = Statevector.from_instruction(circuit)
+        probabilities = state.probabilities(qargs=[0])
+        observed = float(probabilities[0] - probabilities[1])
+        assert abs(observed - expected) < TOL
+
+
+def test_safe_retirement_resource_regression() -> None:
+    compilation = AJLCompiler(
+        AJLPathModel(6, 5),
+        parallel_config(),
+    ).compile_hadamard_test(
+        "1 3 2 5",
+        "101010",
+        "real",
+        measure=False,
+    )
+
+    assert compilation.level_2_multicontrolled.metadata["generator_layers"] == (
+        (1, 3, 5),
+        (2,),
+    )
+    assert compilation.level_2_multicontrolled.metadata[
+        "prefix_height_unloads"
+    ] == 0
+    assert compilation.level_2_multicontrolled.metadata[
+        "prefix_height_path_steps"
+    ] == 7
+    for circuit, expected_count, expected_depth in (
+        (compilation.level_2_multicontrolled, 98, 45),
+        (compilation.level_3_single_control, 134, 65),
+    ):
+        assert sum(circuit.count_ops().values()) == expected_count
+        assert circuit.depth() == expected_depth
+
+
 def test_parallel_clean_ancilla_workspace_is_partitioned_by_lane() -> None:
     compiler = AJLCompiler(
         AJLPathModel(5, 17),
